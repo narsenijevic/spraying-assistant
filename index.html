@@ -1,0 +1,2343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Spraying Assistant</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            'ag-dark':   '#0b2318',
+            'ag-deep':   '#112d1e',
+            'ag-mid':    '#1a4731',
+            'ag-panel':  '#21583c',
+            'ag-teal':   '#2d6a4f',
+            'ag-bright': '#40916c',
+            'ag-lite':   '#52b788',
+            'ag-cream':  '#f0f4ec',
+            'ag-gold':   '#c9a84c',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+    * { box-sizing: border-box; }
+    ::-webkit-scrollbar { height: 4px; width: 4px; background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(82,183,136,0.35); border-radius: 4px; }
+    /* Reusable frost utilities applied via style= */
+    .frost       { backdrop-filter: blur(18px) saturate(1.5); -webkit-backdrop-filter: blur(18px) saturate(1.5); }
+    .frost-light { backdrop-filter: blur(12px) saturate(1.3); -webkit-backdrop-filter: blur(12px) saturate(1.3); }
+    .frost-deep  { backdrop-filter: blur(28px) saturate(1.6); -webkit-backdrop-filter: blur(28px) saturate(1.6); }
+    input::placeholder { color: rgba(240,244,236,0.3); }
+    input:focus { outline: none; }
+    .collapsible-toggle { cursor:pointer; user-select:none; list-style:none; }
+    .collapsible-toggle::-webkit-details-marker { display:none; }
+    details > summary { cursor:pointer; list-style:none; }
+    details > summary::-webkit-details-marker { display:none; }
+    @media (max-width: 640px) {
+      .metric-grid { grid-template-columns: repeat(2,1fr) !important; }
+      .nozzle-cards { flex-direction: column !important; }
+      .rules-legend { grid-template-columns: 1fr !important; }
+      .param-grid { grid-template-columns: repeat(2,1fr) !important; }
+    }
+    @media print {
+      body { background: #fff !important; }
+      #root > div > div:first-child { display:none; }
+      .no-print { display:none !important; }
+      .print-record { display:block !important; color:#000; font-family:Arial,sans-serif; }
+      .print-record h1 { font-size:20px; border-bottom:2px solid #000; padding-bottom:8px; }
+      .print-record .pr-row { display:flex; gap:16px; margin:6px 0; font-size:13px; }
+      .print-record .pr-label { font-weight:700; min-width:140px; }
+      .print-record .pr-section { margin:18px 0 8px; font-size:15px; font-weight:700; border-bottom:1px solid #ccc; padding-bottom:4px; }
+      .print-record .pr-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+      .print-record .pr-table th { background:#f0f0f0; border:1px solid #ccc; padding:6px 8px; text-align:left; }
+      .print-record .pr-table td { border:1px solid #ccc; padding:5px 8px; }
+      .print-record .sig-line { margin-top:32px; border-top:1px solid #000; width:260px; display:inline-block; padding-top:4px; font-size:11px; }
+    }
+  </style>
+</head>
+<body style="background:linear-gradient(135deg,#0a0b0c 0%,#0d0e10 50%,#09090b 100%); margin:0; min-height:100vh">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    /* ─── Helpers ─────────────────────────────────────────────── */
+    function degToCompass(deg) {
+      const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+      return dirs[Math.round(deg / 22.5) % 16];
+    }
+
+    function fmtHour(iso) {
+      const d = new Date(iso);
+      return d.toLocaleTimeString([], { hour: 'numeric', hour12: true });
+    }
+
+    function fmtDateTime() {
+      return new Date().toLocaleString([], {
+        weekday: 'short', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+      });
+    }
+
+    /* status = 'green' | 'yellow' | 'red' */
+    function sprayStatus(wind, rain2h, rain4h) {
+      if (wind > 15 || rain2h >= 40)           return 'red';
+      if (wind >= 10 || rain4h >= 40)           return 'yellow';
+      if (wind >= 3)                             return 'green';
+      return 'yellow'; // < 3 mph — inversion / no-drift-dispersal risk
+    }
+
+    const STATUS_CFG = {
+      green:  { label: 'GO',      sub: 'Safe to Spray',    ring: '#22c55e', bg: '#166534', text: '#bbf7d0', dot: '#4ade80' },
+      yellow: { label: 'CAUTION', sub: 'Spray with Care',  ring: '#f59e0b', bg: '#78350f', text: '#fef3c7', dot: '#fbbf24' },
+      red:    { label: 'NO-GO',   sub: 'Do Not Spray',     ring: '#ef4444', bg: '#7f1d1d', text: '#fee2e2', dot: '#f87171' },
+    };
+
+    const ADVICE = {
+      green: {
+        headline: 'Conditions are favorable — proceed with application.',
+        points: [
+          'Wind is within the optimal 3–10 mph range.',
+          'No significant rain forecast for the next 4 hours.',
+          'Spray drift risk is low; standard nozzle selection applies.',
+          'Monitor conditions and stop if wind picks up unexpectedly.',
+        ]
+      },
+      yellow: {
+        headline: 'Marginal conditions — spray with caution.',
+        points: [
+          'Wind speed is near the upper threshold; drift is possible.',
+          'Use drift-reduction nozzles and keep boom close to canopy.',
+          'Reduce application speed and consider lower boom pressure.',
+          'Consider waiting for a better window in the next few hours.',
+        ]
+      },
+      red: {
+        headline: 'Unsafe conditions — do not spray now.',
+        points: [
+          'Wind speed exceeds safe limits — significant drift hazard.',
+          'Rain risk may wash applied product off target surfaces.',
+          'Off-target movement can harm neighbouring crops and waterways.',
+          'Check the Spray Window forecast below for the next opportunity.',
+        ]
+      }
+    };
+
+    /* ─── Sub-components ──────────────────────────────────────── */
+    function WindArrow({ deg, size = 18 }) {
+      return (
+        <svg width={size} height={size} viewBox="0 0 20 20" style={{ display:'inline-block', verticalAlign:'middle' }}>
+          <g transform={`rotate(${deg}, 10, 10)`}>
+            <polygon points="10,1 14,17 10,13 6,17" fill="currentColor" />
+          </g>
+        </svg>
+      );
+    }
+
+    function StatusOrb({ status }) {
+      const c = STATUS_CFG[status];
+      return (
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
+          <div style={{
+            width: 140, height: 140, borderRadius: '50%',
+            background: c.bg,
+            border: `4px solid ${c.ring}`,
+            boxShadow: `0 0 40px ${c.ring}55, 0 0 80px ${c.ring}22`,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            gap: 2
+          }}>
+            <span style={{ fontSize: 38, color: c.dot }}>
+              {status === 'green' ? '✓' : status === 'yellow' ? '⚠' : '✕'}
+            </span>
+            <span style={{ fontSize: 16, fontWeight: 900, color: '#fff', letterSpacing: 2 }}>
+              {c.label}
+            </span>
+          </div>
+          <span style={{ color: c.dot, fontWeight: 700, fontSize: 14 }}>{c.sub}</span>
+        </div>
+      );
+    }
+
+    function MetricCard({ icon, label, value, unit }) {
+      return (
+        <div className="frost-light rounded-xl p-4 flex flex-col items-center gap-1"
+             style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.1)', boxShadow:'0 2px 16px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.07)' }}>
+          <span style={{ fontSize: 24 }}>{icon}</span>
+          <span style={{ color:'rgba(255,255,255,0.45)', fontSize: 10, fontWeight: 700, textTransform:'uppercase', letterSpacing: 2 }}>{label}</span>
+          <div className="flex items-baseline gap-1">
+            <span style={{ color:'#fff', fontWeight: 800, fontSize: 26 }}>{value}</span>
+            <span style={{ color:'rgba(240,244,236,0.45)', fontSize: 13 }}>{unit}</span>
+          </div>
+        </div>
+      );
+    }
+
+    function HourCell({ time, wind, dir, rain, isNow }) {
+      const st = sprayStatus(wind, rain, rain);
+      const palette = {
+        green:  { bg: 'rgba(34,197,94,0.12)',  border: 'rgba(34,197,94,0.55)',  text: '#86efac' },
+        yellow: { bg: 'rgba(251,191,36,0.12)', border: 'rgba(251,191,36,0.55)', text: '#fde68a' },
+        red:    { bg: 'rgba(239,68,68,0.12)',  border: 'rgba(239,68,68,0.55)',  text: '#fca5a5' },
+      };
+      const p = palette[st];
+      return (
+        <div className="frost-light" style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
+          padding: '8px 10px', borderRadius: 10, minWidth: 62,
+          background: p.bg, border: `1.5px solid ${p.border}`,
+          boxShadow: isNow ? '0 0 0 2px rgba(255,255,255,0.7)' : 'none',
+          outline: 'none'
+        }}>
+          <span style={{ color: '#fff', fontSize: 11, fontWeight: 700 }}>
+            {isNow ? 'NOW' : fmtHour(time)}
+          </span>
+          <span style={{ color: '#fff', fontSize: 15, fontWeight: 800 }}>
+            {Math.round(wind)}
+          </span>
+          <span style={{ color: 'rgba(255,255,255,0.65)', fontSize: 10 }}>mph</span>
+          <span style={{ color: p.text }}><WindArrow deg={dir} size={16} /></span>
+          <span style={{ color: 'rgba(255,255,255,0.75)', fontSize: 10 }}>{degToCompass(dir)}</span>
+          <span style={{ color: 'rgba(255,255,255,0.65)', fontSize: 10 }}>🌧 {rain}%</span>
+        </div>
+      );
+    }
+
+    /* ─── Spray Recommendation Data ──────────────────────────── */
+    const NOZZLE_RECS = {
+      /* GO — calm (3–7 mph) */
+      low: {
+        windLabel: '3–7 mph',
+        tier: 'Low Drift Risk',
+        tierColor: '#4ade80',
+        tierBg: 'rgba(34,197,94,0.07)',
+        tierBorder: 'rgba(74,222,128,0.22)',
+        gpa: { min: 10, max: 20, ideal: '10–15' },
+        boom: '20–24"',
+        speed: '≤ 12 mph',
+        pressure: '30–40 PSI',
+        nozzles: [
+          {
+            tag: 'PRIMARY',
+            tagColor: '#4ade80',
+            model: 'TeeJet XR11004VP',
+            series: 'Extended Range (XR)',
+            pattern: '110° flat fan',
+            droplet: 'Medium (M)',
+            dropletColor: '#fbbf24',
+            asabe: 'ASABE M',
+            driftReduction: 'Baseline',
+            pressure: '20–40 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'General-purpose 110° flat fan. Excellent uniform coverage and penetration for most herbicide and fungicide programs in calm conditions.',
+            best: 'Herbicides, fungicides, insecticides in < 7 mph wind',
+          },
+          {
+            tag: 'ALTERNATIVE',
+            tagColor: 'rgba(255,255,255,0.55)',
+            model: 'TeeJet TT11003VP',
+            series: 'TwinJet (TT)',
+            pattern: '110° twin flat fan (30° fwd/back)',
+            droplet: 'Medium (M)',
+            dropletColor: '#fbbf24',
+            asabe: 'ASABE M',
+            driftReduction: 'Slight improvement',
+            pressure: '20–40 PSI',
+            flow: '0.30 gpm @ 40 PSI',
+            desc: 'Dual flat-fan spray angles improve canopy penetration in thick crop. Same droplet class as XR but better vertical coverage.',
+            best: 'Row crops (corn, soybeans) needing canopy penetration',
+          },
+        ],
+        tips: [
+          'Standard flat-fan nozzles are fully appropriate at this wind speed.',
+          'Increase GPA to 15–20 for contact fungicides — more droplets per sq. ft. matters.',
+          'Spray early morning (6–9 AM) when wind is typically calmest and humidity is higher.',
+          'Keep boom level and stable — boom bounce at speed degrades coverage more than wind.',
+          'Adjuvants: a non-ionic surfactant (NIS) at 0.25% v/v improves coverage on waxy leaf surfaces.',
+        ],
+      },
+      /* GO — moderate (7–10 mph) */
+      moderate: {
+        windLabel: '7–10 mph',
+        tier: 'Moderate Drift Risk',
+        tierColor: '#fbbf24',
+        tierBg: 'rgba(251,191,36,0.07)',
+        tierBorder: 'rgba(251,191,36,0.22)',
+        gpa: { min: 10, max: 15, ideal: '12–15' },
+        boom: '18–20"',
+        speed: '≤ 8 mph',
+        pressure: '30–60 PSI',
+        nozzles: [
+          {
+            tag: 'PRIMARY',
+            tagColor: '#fbbf24',
+            model: 'TeeJet AIXR11004VP',
+            series: 'Air Induction Extended Range (AIXR)',
+            pattern: '110° air induction flat fan',
+            droplet: 'Coarse–Very Coarse (C–VC)',
+            dropletColor: '#f97316',
+            asabe: 'ASABE C / VC',
+            driftReduction: '≈ 50% vs. XR baseline',
+            pressure: '30–60 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'Air induction venturi design entrains air bubbles to produce coarse, heavier droplets. Excellent compromise between drift reduction and coverage.',
+            best: 'Herbicides & systemic fungicides in 7–10 mph conditions',
+          },
+          {
+            tag: 'ALTERNATIVE',
+            tagColor: '#fde68a',
+            model: 'TeeJet DG11004VP',
+            series: 'Drift Guard TwinJet (DG)',
+            pattern: '110° twin flat fan',
+            droplet: 'Coarse (C)',
+            dropletColor: '#f97316',
+            asabe: 'ASABE C',
+            driftReduction: '≈ 40% vs. XR baseline',
+            pressure: '20–40 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'Venturi-assisted twin fan delivering coarse droplets with dual-angle coverage. Good option when canopy penetration is still a priority.',
+            best: 'Broadcast pre- or post-emergence herbicide applications',
+          },
+        ],
+        tips: [
+          'Switch to coarse-droplet nozzles — this is the most important single step at 7–10 mph.',
+          'Lower boom to 18–20" above the canopy to shorten droplet time-of-flight.',
+          'Reduce ground speed to 7–8 mph; slower speed = more time for droplets to settle.',
+          'Add a drift-reduction adjuvant (e.g., Preference, Intact) at label rate.',
+          'Buffer zones: maintain at least 300 ft from open water; check label for sensitive crop setbacks.',
+          'Re-check wind before each field — gusts can spike 3–4 mph above average.',
+        ],
+      },
+      /* CAUTION (10–15 mph) */
+      high: {
+        windLabel: '10–15 mph',
+        tier: 'High Drift Risk — Marginal',
+        tierColor: '#f87171',
+        tierBg: 'rgba(239,68,68,0.07)',
+        tierBorder: 'rgba(248,113,113,0.22)',
+        gpa: { min: 10, max: 15, ideal: '10–12' },
+        boom: '≤ 18"',
+        speed: '≤ 6 mph',
+        pressure: '20–60 PSI',
+        nozzles: [
+          {
+            tag: 'PRIMARY',
+            tagColor: '#f87171',
+            model: 'TeeJet TTI11004VP',
+            series: 'TurboDrop TwinJet Induction (TTI)',
+            pattern: '110° air induction twin flat fan',
+            droplet: 'Very Coarse–Ultra Coarse (VC–UC)',
+            dropletColor: '#ef4444',
+            asabe: 'ASABE VC / UC',
+            driftReduction: '> 90% vs. XR baseline',
+            pressure: '20–60 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'Air induction twin fan producing very coarse to ultra-coarse droplets. Combines maximum drift suppression with dual-angle deposition. Best available option when wind exceeds 10 mph.',
+            best: 'All pesticide classes when wind is 10–15 mph; last viable nozzle before NO-GO',
+          },
+          {
+            tag: 'ALTERNATIVE',
+            tagColor: '#fca5a5',
+            model: 'TeeJet AI11004VP',
+            series: 'Air Induction (AI)',
+            pattern: '110° air induction flat fan',
+            droplet: 'Very Coarse–Extremely Coarse (VC–XC)',
+            dropletColor: '#ef4444',
+            asabe: 'ASABE VC / XC',
+            driftReduction: '> 80% vs. XR baseline',
+            pressure: '20–40 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'Single flat fan with aggressive air induction, producing ultra-coarse droplets. Simpler design, lower cost, effective for systemic and soil-applied products.',
+            best: 'Burndown, pre-emergence herbicides and soil insecticide applications',
+          },
+        ],
+        tips: [
+          'Seriously evaluate postponing — label compliance and efficacy are both at risk above 10 mph.',
+          'Air induction (TTI or AI) nozzles are the minimum requirement; do NOT use standard flat fans.',
+          'Lower boom as close to canopy as practical — 15–18" maximum.',
+          'Slow ground speed to 5–6 mph; faster speeds create bow-wave turbulence that lifts droplets.',
+          'Document wind speed, direction, temp, and RH at time of application for application records.',
+          'Do NOT spray within 500 ft of bodies of water, roads, or sensitive areas at this wind speed.',
+          'Use a spray colorant (e.g., Hi-Light Blue) to verify deposition and minimize overlap.',
+        ],
+      },
+
+      /* ── Dicamba-specific (XtendiMax / Engenia / FeXapan / labeled products) ── */
+      dicamba: {
+        windLabel: '3–10 mph (label-mandated)',
+        tier: 'Dicamba Label-Compliant',
+        tierColor: '#f87171',
+        tierBg: 'rgba(239,68,68,0.08)',
+        tierBorder: 'rgba(248,113,113,0.35)',
+        gpa: { min: 10, max: 15, ideal: '10–15' },
+        boom: '≤ 24"',
+        speed: '≤ 10 mph',
+        pressure: '20–40 PSI',
+        nozzles: [
+          {
+            tag: 'LABEL REQUIRED',
+            tagColor: '#f87171',
+            model: 'TeeJet TTI11004VP',
+            series: 'TurboDrop Twin Induction (TTI)',
+            pattern: '110° air induction twin flat fan',
+            droplet: 'Extremely Coarse–Ultra Coarse (XC–UC)',
+            dropletColor: '#b91c1c',
+            asabe: 'ASABE XC / UC',
+            driftReduction: '> 95% vs. XR baseline',
+            pressure: '20–40 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'Required nozzle class for XtendiMax, Engenia, and FeXapan. TTI air-induction twin fan produces XC–UC droplets meeting the Extremely Coarse minimum mandated by current dicamba product labels. Lower pressure = coarser droplet.',
+            best: 'All labeled dicamba products on Xtend soybean and XtendFlex/Bollgard cotton',
+          },
+          {
+            tag: 'LABEL APPROVED',
+            tagColor: '#fca5a5',
+            model: 'TeeJet AITTJ60-11006',
+            series: 'Air Induction TwinJet (AITTJ)',
+            pattern: '110° air induction twin flat fan',
+            droplet: 'Very Coarse–Extremely Coarse (VC–XC)',
+            dropletColor: '#ef4444',
+            asabe: 'ASABE VC / XC',
+            driftReduction: '> 90% vs. XR baseline',
+            pressure: '20–60 PSI',
+            flow: '0.60 gpm @ 40 PSI',
+            desc: 'Alternative approved nozzle for dicamba labels. Produces VC–XC droplets — verify the specific size (06 = 0.6 gpm @ 40 PSI) meets your label\'s nozzle list. Always cross-check with the approved nozzle table in your product label.',
+            best: 'Alternative when TTI11004VP is unavailable — confirm against label approved list',
+          },
+        ],
+        tips: [
+          'WIND WINDOW: Apply only when wind is 3–10 mph. Below 3 mph = temperature inversion risk (vapor can travel miles off-target). Above 10 mph = label violation and immediate drift hazard.',
+          'TEMPERATURE: ≤85°F at application time. Volatilization rate of dicamba increases sharply above 85°F — apply early morning before temperatures rise.',
+          'NOZZLE COMPLIANCE: Only nozzles on the approved list for your specific product are legal. TTI11004VP and AITTJ60-11006 are on most lists, but verify each product label separately.',
+          'BOOM HEIGHT: ≤24 inches above the target weed canopy — not above the crop canopy. Measure from weeds, not from the top of the crop.',
+          'BUFFERS: Maintain 110 ft downwind from non-target broadleaf plants in bloom, ornamentals, and gardens. Check your state-specific label addendum — some states require larger buffers.',
+          'NO AMS: Do NOT add ammonium sulfate (AMS) to XtendiMax, FeXapan, or Engenia — it is not an approved tank-mix partner and may increase volatilization risk.',
+          'APPROVED PARTNERS ONLY: Only tank-mix with products on the approved partner list. Mixing with unapproved products voids label compliance.',
+          'RECORD KEEPING: Document start/end time, wind speed and direction, temperature, RH, nozzle type and size, boom height, and field location. This is a regulatory requirement in many states.',
+          'INVERSION CHECK: Do not apply when fog is present, near sunrise/sunset in calm conditions, or when smoke/dust moves slowly and laterally — these are inversion indicators.',
+        ],
+      },
+
+      /* ── 2,4-D ester — volatile formulation ── */
+      ester: {
+        windLabel: '< 10 mph, ≤ 85°F required',
+        tier: '2,4-D Ester — Volatility Risk',
+        tierColor: '#fb923c',
+        tierBg: 'rgba(251,146,60,0.08)',
+        tierBorder: 'rgba(251,146,60,0.35)',
+        gpa: { min: 10, max: 20, ideal: '10–15' },
+        boom: '≤ 24"',
+        speed: '≤ 8 mph',
+        pressure: '30–40 PSI',
+        nozzles: [
+          {
+            tag: 'MINIMUM REQUIRED',
+            tagColor: '#fb923c',
+            model: 'TeeJet AIXR11004VP',
+            series: 'Air Induction Extended Range (AIXR)',
+            pattern: '110° air induction flat fan',
+            droplet: 'Coarse–Very Coarse (C–VC)',
+            dropletColor: '#f97316',
+            asabe: 'ASABE C / VC',
+            driftReduction: '≈ 50% vs. XR baseline',
+            pressure: '30–60 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'Minimum nozzle for 2,4-D ester in low-wind, cool conditions. Air induction reduces the fine droplet fraction that is most susceptible to volatilization and physical drift. Use only when wind < 7 mph AND temperature < 75°F.',
+            best: '2,4-D ester when wind < 7 mph and temperature < 75°F',
+          },
+          {
+            tag: 'PREFERRED ≥ 75°F',
+            tagColor: '#fdba74',
+            model: 'TeeJet TTI11004VP',
+            series: 'TurboDrop Twin Induction (TTI)',
+            pattern: '110° air induction twin flat fan',
+            droplet: 'Extremely Coarse–Ultra Coarse (XC–UC)',
+            dropletColor: '#b91c1c',
+            asabe: 'ASABE XC / UC',
+            driftReduction: '> 95% vs. XR baseline',
+            pressure: '20–40 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'Preferred nozzle for 2,4-D ester when temperatures are elevated (≥ 75°F) or wind is 7–10 mph. XC–UC droplets dramatically reduce the fine fraction available for off-target movement and vapor-phase drift.',
+            best: '2,4-D ester when temperature ≥ 75°F or wind is 7–10 mph',
+          },
+        ],
+        tips: [
+          'DO NOT APPLY ABOVE 85°F: Ester formulations volatilize aggressively in hot conditions — vapor can drift miles. If temps above 85°F are forecast, switch to a low-volatility 2,4-D amine or choline salt.',
+          'WIND: Keep below 10 mph. Below 3 mph can also be risky due to temperature inversions — ideal window is 3–10 mph with a steady direction away from sensitive areas.',
+          'BUFFERS: Stay well clear of grape vineyards, fruit trees, vegetable gardens, ornamental broadleaves, and tobacco — ester drift and vapor can cause injury at distances > 300 ft under warm conditions.',
+          'NOZZLE UPGRADE: At temperatures ≥ 75°F, step up from AIXR to TTI nozzles (XC–UC droplets) — the additional reduction in fine droplet fraction is significant for esters.',
+          'APPLY EARLY MORNING: The best window for ester applications is early morning (before 9 AM) when temperatures are lowest, wind is typically calmer, and boundary layer mixing reduces vapor concentration.',
+          'ADJUVANTS: Do not add extra surfactant beyond label rate — additional surfactant can increase coverage of fine droplets that carry ester vapor off-target.',
+        ],
+      },
+    };
+
+    const DROPLET_SCALE = [
+      { code: 'VF', label: 'Very Fine',      color: '#a78bfa' },
+      { code: 'F',  label: 'Fine',           color: '#60a5fa' },
+      { code: 'M',  label: 'Medium',         color: '#fbbf24' },
+      { code: 'C',  label: 'Coarse',         color: '#f97316' },
+      { code: 'VC', label: 'Very Coarse',    color: '#ef4444' },
+      { code: 'XC', label: 'Extr. Coarse',  color: '#b91c1c' },
+      { code: 'UC', label: 'Ultra Coarse',   color: '#7f1d1d' },
+    ];
+
+    function NozzleCard({ nozzle }) {
+      return (
+        <div className="frost-light" style={{
+          flex: 1, minWidth: 260,
+          background: 'rgba(255,255,255,0.05)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 14, padding: 18,
+          display: 'flex', flexDirection: 'column', gap: 10,
+          boxShadow: '0 4px 24px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.06)'
+        }}>
+          {/* Header row */}
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap: 8 }}>
+            <span style={{
+              background: `${nozzle.tagColor}22`, border: `1px solid ${nozzle.tagColor}55`,
+              color: nozzle.tagColor, fontSize: 10, fontWeight: 800, letterSpacing: 1.5,
+              padding: '3px 8px', borderRadius: 6, textTransform:'uppercase'
+            }}>{nozzle.tag}</span>
+            <span style={{
+              background: `${nozzle.dropletColor}22`, border: `1px solid ${nozzle.dropletColor}55`,
+              color: nozzle.dropletColor, fontSize: 10, fontWeight: 700,
+              padding: '3px 8px', borderRadius: 6
+            }}>{nozzle.asabe}</span>
+          </div>
+
+          {/* Model */}
+          <div>
+            <div style={{ color: '#f0f4ec', fontSize: 17, fontWeight: 800, letterSpacing: -0.3 }}>
+              {nozzle.model}
+            </div>
+            <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, fontWeight: 600, marginTop: 1 }}>
+              {nozzle.series}
+            </div>
+          </div>
+
+          {/* Specs grid */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: '6px 12px' }}>
+            {[
+              ['Pattern',   nozzle.pattern],
+              ['Droplet',   nozzle.droplet],
+              ['Pressure',  nozzle.pressure],
+              ['Flow',      nozzle.flow],
+              ['Drift Red.', nozzle.driftReduction],
+            ].map(([k, v]) => (
+              <div key={k}>
+                <div style={{ color:'rgba(240,244,236,0.4)', fontSize: 10, fontWeight: 700, textTransform:'uppercase', letterSpacing: 1 }}>{k}</div>
+                <div style={{ color:'rgba(240,244,236,0.85)', fontSize: 12, fontWeight: 500, lineHeight: 1.3 }}>{v}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Description */}
+          <p style={{ margin:0, color:'rgba(240,244,236,0.6)', fontSize: 12, lineHeight: 1.55, borderTop:'1px solid rgba(64,145,108,0.15)', paddingTop: 10 }}>
+            {nozzle.desc}
+          </p>
+
+          {/* Best for */}
+          <div style={{ background:'rgba(64,145,108,0.1)', borderRadius: 8, padding: '7px 10px' }}>
+            <span style={{ color:'rgba(240,244,236,0.4)', fontSize: 10, fontWeight: 700, textTransform:'uppercase', letterSpacing:1 }}>Best for: </span>
+            <span style={{ color:'rgba(255,255,255,0.65)', fontSize: 12, fontWeight: 500 }}>{nozzle.best}</span>
+          </div>
+        </div>
+      );
+    }
+
+    /* ─── Herbicide Database ──────────────────────────────────── */
+    const HERBICIDE_DB = [
+      /* ── Group 9: EPSPS (Glyphosate) ── */
+      { id:'roundup-powermax3', name:'Roundup PowerMAX 3', ai:'Glyphosate (potassium salt) 54.5%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble liquid', rate:'11–88 fl oz/ac', crops:'RR corn, soybean, cotton, canola, alfalfa', phi:'Varies by crop', rei:'4 hr', rainfast:'30 min', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual & perennial grasses and broadleaf weeds', notes:'Best efficacy 60–85°F. No rain within 30 min of application. Do not apply when wind >15 mph.' },
+      { id:'durango-dma', name:'Durango DMA', ai:'Glyphosate (dimethylamine salt) 53.8%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble liquid', rate:'16–64 fl oz/ac', crops:'RR corn, soybean, cotton, canola', phi:'Varies by crop', rei:'4 hr', rainfast:'30 min', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual & perennial grasses and broadleaf weeds', notes:'DMA salt may volatilize at high temps. Avoid application above 90°F.' },
+      { id:'enlist-one', name:'Enlist One', ai:'Glyphosate (choline salt) 74.1%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble concentrate', rate:'24–32 fl oz/ac', crops:'Enlist corn, Enlist E3 soybean', phi:'See label', rei:'4 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:90, targetWeeds:'Glyphosate-susceptible grasses and broadleaf weeds', notes:'Choline salt formulation. Use approved Colex-D nozzles. 30 ft downwind buffer from susceptible broadleaf crops.' },
+      { id:'roundup-weathermax', name:'Roundup WeatherMAX', ai:'Glyphosate (potassium salt) 48.7%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble liquid', rate:'12–88 fl oz/ac', crops:'RR corn, soybean, cotton, canola, alfalfa, fallow', phi:'Varies', rei:'4 hr', rainfast:'30 min', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual & perennial grasses and broadleaf weeds', notes:'Staple broad-spectrum burndown. Best applied with AMS. Rainfast in 30 min with built-in sticker.' },
+      { id:'rt3', name:'RT3', ai:'Glyphosate (potassium salt) 48%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble liquid', rate:'16–88 fl oz/ac', crops:'RR corn, soybean, cotton, canola', phi:'Varies', rei:'4 hr', rainfast:'30 min', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual & perennial grasses and broadleaf weeds', notes:'Generic glyphosate. Tank-mix with residual herbicides for resistance management.' },
+      { id:'glyphomax-plus', name:'GlyphoMax Plus', ai:'Glyphosate (isopropylamine salt) 41%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble liquid', rate:'16–64 fl oz/ac', crops:'RR corn, soybean, cotton, fallow', phi:'Varies', rei:'4 hr', rainfast:'30 min', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grasses and broadleaf weeds', notes:'IPA salt formulation. Add AMS for improved performance. Effective burndown for no-till acres.' },
+      { id:'accord-xrt-ii', name:'Accord XRT II', ai:'Glyphosate (potassium salt) 53.8%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble liquid', rate:'11–108 fl oz/ac', crops:'Non-cropland, forestry, rights-of-way', phi:'N/A', rei:'4 hr', rainfast:'30 min', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grass and broadleaf weeds, woody plants', notes:'Industrial vegetation management use. Not labeled for row crops. Excellent for ditch banks, fence rows, rights-of-way.' },
+      { id:'credit-41-extra', name:'Credit 41 Extra', ai:'Glyphosate (isopropylamine salt) 41%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble liquid', rate:'16–88 fl oz/ac', crops:'RR corn, soybean, cotton, canola, fallow', phi:'Varies', rei:'4 hr', rainfast:'30 min', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grasses and broadleaf weeds', notes:'Generic IPA salt. Use AMS at 17 lb/100 gal. Good burndown and residue management tool.' },
+      { id:'buccaneer-plus', name:'Buccaneer Plus', ai:'Glyphosate (isopropylamine salt) 41%', group:'9', moa:'EPSPS inhibitor', type:'POST', formulation:'Soluble liquid', rate:'16–64 fl oz/ac', crops:'RR corn, soybean, cotton, fallow', phi:'Varies', rei:'4 hr', rainfast:'30 min', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grasses and broadleaf weeds', notes:'Generic glyphosate. Contains surfactant — reduce or eliminate added surfactant per label directions.' },
+
+      /* ── Group 4: Synthetic Auxins (Dicamba) ── */
+      { id:'xtendimax', name:'XtendiMax with VaporGrip', ai:'Dicamba (diglycolamine salt) 44.2%', group:'4', moa:'Synthetic auxin (dicamba)', type:'POST', formulation:'Soluble liquid', rate:'22 fl oz/ac', crops:'RR2 Xtend soybean, XtendFlex cotton', phi:'30 days (soybean)', rei:'24 hr', rainfast:'4 hr', windMin:3, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Broadleaf weeds incl. waterhemp, Palmer amaranth, marestail', notes:'WIND MUST BE 3–10 MPH — do not apply in calm (<3 mph) or high (>10 mph) wind. Temp ≤85°F. 110 ft buffer from sensitive broadleaf crops in bloom. Only approved tank-mix partners.' },
+      { id:'engenia', name:'Engenia', ai:'Dicamba (BAPMA salt) 57.4%', group:'4', moa:'Synthetic auxin (dicamba)', type:'POST', formulation:'Soluble liquid', rate:'17 fl oz/ac', crops:'RR2 Xtend soybean, Bollgard 3 XtendFlex cotton', phi:'30 days (soybean)', rei:'24 hr', rainfast:'4 hr', windMin:3, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Broadleaf weeds, resistant waterhemp and Palmer amaranth', notes:'Same wind/temp restrictions as XtendiMax (3–10 mph; ≤85°F). 110 ft sensitive crop buffer. BAPMA salt reduces volatility vs. legacy dicamba.' },
+      { id:'fexapan', name:'FeXapan', ai:'Dicamba (diglycolamine salt) 44.2%', group:'4', moa:'Synthetic auxin (dicamba)', type:'POST', formulation:'Soluble liquid', rate:'22 fl oz/ac', crops:'RR2 Xtend soybean', phi:'30 days', rei:'24 hr', rainfast:'4 hr', windMin:3, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Broadleaf weeds, Group 9-resistant biotypes', notes:'Same label restrictions as XtendiMax. Check state-specific label addenda for cut-off dates and additional buffers.' },
+      { id:'clarity', name:'Clarity', ai:'Dicamba (diglycolamine salt) 44.2%', group:'4', moa:'Synthetic auxin (dicamba)', type:'POST', formulation:'Soluble liquid', rate:'4–16 fl oz/ac', crops:'Corn, sorghum, pasture, rangeland, non-crop', phi:'See label', rei:'24 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:90, targetWeeds:'Annual and perennial broadleaf weeds', notes:'DGA formulation for conventional corn and non-Xtend programs. Lower volatility than older amine salts. Not approved for use on Xtend soybeans — use XtendiMax/Engenia/FeXapan for those.' },
+      { id:'banvel', name:'Banvel', ai:'Dicamba (dimethylamine salt) 48%', group:'4', moa:'Synthetic auxin (dicamba)', type:'POST', formulation:'Soluble liquid', rate:'4–16 fl oz/ac', crops:'Corn, wheat, sorghum, pasture, non-crop', phi:'See label', rei:'24 hr', rainfast:'4 hr', windMin:null, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Annual and perennial broadleaf weeds', notes:'Older DMA formulation — higher volatility risk. Avoid applications above 85°F or wind >10 mph. Keep 300 ft from susceptible crops.' },
+
+      /* ── Group 4: 2,4-D ── */
+      { id:'enlist-duo', name:'Enlist Duo', ai:'Glyphosate (choline) 24.2% + 2,4-D choline 24.7%', group:'9 + 4', moa:'EPSPS + Synthetic auxin (2,4-D)', type:'POST', formulation:'Soluble concentrate', rate:'64–96 fl oz/ac', crops:'Enlist corn, Enlist E3 soybean', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:90, targetWeeds:'Glyphosate-resistant broadleaf and grass weeds', notes:'Choline formulation reduces volatility. Requires Colex-D approved nozzles. Do not apply above 90°F. 30 ft downwind buffer from susceptible broadleaf crops.' },
+      { id:'weedone-lv4', name:'Weedone LV4', ai:'2,4-D (butoxyethyl ester) 46.4%', group:'4', moa:'Synthetic auxin (2,4-D)', type:'POST', formulation:'Emulsifiable concentrate', rate:'1–2 pt/ac', crops:'Corn, wheat, sorghum, pasture, rangeland', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:10, tempMin:40, tempMax:85, targetWeeds:'Annual and perennial broadleaf weeds', notes:'Ester formulation — higher volatility risk in hot weather. Do not apply when temp >85°F or wind >10 mph. Keep away from susceptible broadleaf crops.' },
+      { id:'soluamine-6', name:'Soluamine 6', ai:'2,4-D (dimethylamine salt) 46.5%', group:'4', moa:'Synthetic auxin (2,4-D)', type:'POST', formulation:'Soluble liquid', rate:'1–2 pt/ac', crops:'Corn, wheat, sorghum, pasture, turf, non-crop', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial broadleaf weeds', notes:'Amine salt — lower volatility than ester forms. Apply to small actively growing weeds. NIS recommended.' },
+      { id:'enlist-one-24d', name:'Enlist One (2,4-D Choline)', ai:'2,4-D choline salt 74.1%', group:'4', moa:'Synthetic auxin (2,4-D)', type:'POST', formulation:'Soluble concentrate', rate:'25–32 fl oz/ac', crops:'Enlist corn, Enlist E3 soybean, Enlist cotton', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:90, targetWeeds:'Broadleaf weeds, glyphosate-resistant waterhemp, Palmer amaranth', notes:'Low-volatility choline salt. Must use Colex-D approved nozzles. 30 ft downwind buffer from susceptible broadleaf crops in bloom.' },
+      { id:'starane-ultra', name:'Starane Ultra', ai:'Fluroxypyr 1-methylheptyl ester 39.6%', group:'4', moa:'Synthetic auxin (pyridine)', type:'POST', formulation:'EC', rate:'0.33–0.67 pt/ac', crops:'Corn, wheat, barley, pasture, rangeland', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial broadleaf weeds, morningglory, buckwheat', notes:'Excellent morningglory and cleavers control. No soybean or cotton rotation restrictions. Safe tank-mix partner in corn and small grains.' },
+      { id:'stinger', name:'Stinger', ai:'Clopyralid 3 lb/gal', group:'4', moa:'Synthetic auxin (pyridine)', type:'POST', formulation:'SL', rate:'0.33–0.67 pt/ac', crops:'Corn, wheat, barley, sunflower, sugar beet, alfalfa', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Canada thistle, clover, mustards, legume weeds', notes:'Excellent thistle and clover control. Composted manure from treated hay can injure susceptible crops. Long soil persistence — rotational restrictions apply.' },
+      { id:'tordon-22k', name:'Tordon 22K', ai:'Picloram 21.8%', group:'4', moa:'Synthetic auxin (pyridine)', type:'POST', formulation:'Soluble liquid', rate:'1–2 pt/ac', crops:'Wheat, barley, oats, pasture, rangeland, non-crop', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial broadleaf weeds, brush', notes:'RESTRICTED USE. Extremely persistent in soil — do not use where susceptible crops will be planted. State-specific use restrictions apply.' },
+      { id:'milestone', name:'Milestone', ai:'Aminopyralid 40.6%', group:'4', moa:'Synthetic auxin (pyridine)', type:'POST', formulation:'SL', rate:'5–7 fl oz/ac', crops:'Pasture, rangeland, non-crop', phi:'Not for use on cropland', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Canada thistle, leafy spurge, knapweed, other perennial broadleaf weeds', notes:'Excellent broadleaf weed control in grasslands. Do not use manure or hay from treated fields on susceptible crops for multiple years. Not for row-crop use.' },
+      { id:'mcpa-amine', name:'MCPA Amine 4', ai:'MCPA (dimethylamine salt) 46%', group:'4', moa:'Synthetic auxin (phenoxy)', type:'POST', formulation:'Soluble liquid', rate:'1–1.5 pt/ac', crops:'Wheat, barley, oats, rye, alfalfa, flax', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial broadleaf weeds in small grains', notes:'Less crop injury than 2,4-D in small grains at jointing. Lower volatility than 2,4-D ester. Often used as safer option for oats and rye.' },
+
+      /* ── Group 10: Glufosinate ── */
+      { id:'liberty-280sl', name:'Liberty 280 SL', ai:'Glufosinate-ammonium 27.7%', group:'10', moa:'Glutamine synthetase inhibitor', type:'POST', formulation:'Soluble liquid', rate:'29–36 fl oz/ac', crops:'LibertyLink corn, soybean, cotton, canola', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:50, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds, resistant biotypes', notes:'Contact mode of action — thorough coverage critical. Best efficacy >60°F with sunlight. Cloudy/cool conditions reduce activity.' },
+      { id:'interline', name:'Interline', ai:'Glufosinate-ammonium 22.4%', group:'10', moa:'Glutamine synthetase inhibitor', type:'POST', formulation:'Soluble liquid', rate:'29–43 fl oz/ac', crops:'LibertyLink corn, soybean, cotton', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:50, tempMax:null, targetWeeds:'Annual and perennial grasses and broadleaf weeds', notes:'Requires good coverage for contact activity. Works similarly to Liberty. Apply in adequate spray volume (15–20 GPA).' },
+      { id:'rely-280', name:'Rely 280', ai:'Glufosinate-ammonium 27.7%', group:'10', moa:'Glutamine synthetase inhibitor', type:'POST', formulation:'Soluble liquid', rate:'29–43 fl oz/ac', crops:'LibertyLink corn, soybean, cotton, canola, non-crop', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:50, tempMax:null, targetWeeds:'Glyphosate-resistant waterhemp, Palmer amaranth, marestail, annual grasses', notes:'Equivalent to Liberty. Requires sunlight for maximum burndown activity. Use 15+ GPA for adequate coverage.' },
+      { id:'lifeline', name:'Lifeline', ai:'Glufosinate-ammonium 22.4%', group:'10', moa:'Glutamine synthetase inhibitor', type:'POST', formulation:'Soluble liquid', rate:'32–43 fl oz/ac', crops:'LibertyLink corn, soybean, cotton', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:50, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds including resistant biotypes', notes:'Generic glufosinate. Contact-only action — full coverage essential. Apply in warm sunny conditions for best burndown.' },
+      { id:'cheetah', name:'Cheetah', ai:'Glufosinate-ammonium 22.4%', group:'10', moa:'Glutamine synthetase inhibitor', type:'POST', formulation:'Soluble liquid', rate:'29–43 fl oz/ac', crops:'LibertyLink corn, soybean, cotton, canola', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:50, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds, resistant biotypes', notes:'Contact herbicide — sunlight required for activation. Best performance at 70–90°F. Do not apply during cool, overcast weather.' },
+
+      /* ── Group 5: Photosystem II ── */
+      { id:'aatrex-4l', name:'AAtrex 4L (Atrazine)', ai:'Atrazine 41.9%', group:'5', moa:'Photosystem II inhibitor', type:'PRE/POST', formulation:'Flowable', rate:'1–3 qt/ac (state limits apply)', crops:'Corn, sorghum', phi:'45–60 days', rei:'12 hr', rainfast:'Requires rain/incorporation for PRE', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf and grass weeds', notes:'Maximum 2.5 lb ai/ac/year. Many states have rate restrictions. Water buffer zones required. Corn-only; do not use on non-labeled crops.' },
+      { id:'bicep-ii-magnum', name:'Bicep II Magnum', ai:'S-metolachlor 31.4% + Atrazine 28.4%', group:'15 + 5', moa:'VLCFA + PSII inhibitor', type:'PRE', formulation:'Emulsifiable concentrate', rate:'1.5–3 pt/ac', crops:'Corn, sorghum', phi:'See label', rei:'12 hr', rainfast:'Requires rainfall for activation', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds', notes:'Pre-emergence use only for corn. Needs moisture within 7 days. Atrazine component has annual use limits.' },
+      { id:'princep', name:'Princep 4L (Simazine)', ai:'Simazine 41.6%', group:'5', moa:'Photosystem II inhibitor', type:'PRE', formulation:'Flowable', rate:'2–4 qt/ac', crops:'Corn, sorghum, tree fruits, ornamentals, non-crop', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf and grass weeds', notes:'Soil-applied. Similar to atrazine but lower water solubility. Widely used under tree crops. Long residual.' },
+      { id:'sencor-4f', name:'Sencor 4F (Metribuzin)', ai:'Metribuzin 41.6%', group:'5', moa:'Photosystem II inhibitor', type:'PRE/POST', formulation:'Flowable', rate:'4–8 fl oz/ac', crops:'Soybean, potato, tomato, alfalfa', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds, some grasses', notes:'Excellent soybean PRE option. Avoid use on sandy soils or with <1% OM (leaching injury risk). Rate depends on soil texture.' },
+      { id:'lorox', name:'Lorox (Linuron)', ai:'Linuron 50%', group:'5', moa:'Photosystem II inhibitor', type:'PRE/POST', formulation:'WDG', rate:'1–2 lb/ac', crops:'Corn, soybean, potato, carrot, parsnip', phi:'See label', rei:'24 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf and grass weeds', notes:'Broad-spectrum PSII. Requires moisture for PRE activation. Useful in vegetable crops where few options exist.' },
+      { id:'cotoran', name:'Cotoran 4L (Fluometuron)', ai:'Fluometuron 42.5%', group:'5', moa:'Photosystem II inhibitor (urea)', type:'PRE/POST', formulation:'Flowable', rate:'2–4 pt/ac', crops:'Cotton', phi:'See label', rei:'12 hr', rainfast:'Requires moisture for PRE', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf and grass weeds in cotton', notes:'Cotton-specific. Provides good early season broadleaf control. Needs rainfall for PRE activation. Do not apply to wet or saturated soils.' },
+      { id:'diuron-4l', name:'Diuron 4L', ai:'Diuron 42.4%', group:'5', moa:'Photosystem II inhibitor (urea)', type:'PRE', formulation:'Flowable', rate:'1.6–3.2 pt/ac', crops:'Cotton, alfalfa, non-crop, orchards', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf and grass weeds', notes:'Long soil residual. Primarily used in perennial crops and non-cropland. Potential for groundwater contamination — follow label buffer requirements.' },
+      { id:'lexone', name:'Lexone (Metribuzin DF)', ai:'Metribuzin 75%', group:'5', moa:'Photosystem II inhibitor', type:'PRE/POST', formulation:'DF', rate:'2.67–5.33 oz/ac', crops:'Soybean, potato, tomato, alfalfa', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds, some grasses', notes:'Dry formulation of metribuzin. Same restrictions as Sencor 4F — avoid coarse-textured, low OM soils.' },
+      { id:'velpar-l', name:'Velpar L (Hexazinone)', ai:'Hexazinone 25%', group:'5', moa:'Photosystem II inhibitor', type:'PRE/POST', formulation:'SL', rate:'1–4 pt/ac', crops:'Blueberry, alfalfa, forestry, non-crop', phi:'See label', rei:'12 hr', rainfast:'Requires moisture for soil', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual and perennial broadleaf weeds, grasses, woody plants', notes:'High water solubility — leaching risk on coarse soils. Primarily used in blueberry, alfalfa, and forestry. Keep away from water.' },
+
+      /* ── Group 2: ALS Inhibitors ── */
+      { id:'classic', name:'Classic', ai:'Chlorimuron-ethyl 25%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'0.5–1.0 oz/ac', crops:'Soybean', phi:'60 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds', notes:'Rotational crop restrictions: no corn within 18 months. Resistance very common — rotate modes of action.' },
+      { id:'harmony-gt', name:'Harmony GT SG', ai:'Thifensulfuron-methyl 75%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'0.3–0.6 oz/ac', crops:'Wheat, barley, oats', phi:'30 days', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds in small grains', notes:'Non-ionic surfactant required. Rotational restrictions for soybean, corn after wheat.' },
+      { id:'pursuit', name:'Pursuit', ai:'Imazethapyr 17%', group:'2', moa:'ALS inhibitor (imidazolinone)', type:'PRE/POST', formulation:'Soluble concentrate', rate:'4–6 fl oz/ac', crops:'Soybean, alfalfa, peas', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds', notes:'Long soil residual. 18-month corn plantback restriction. Clearfield or conventional soybean use.' },
+      { id:'raptor', name:'Raptor', ai:'Imazamox 12%', group:'2', moa:'ALS inhibitor (imidazolinone)', type:'POST', formulation:'Soluble concentrate', rate:'4–6 fl oz/ac', crops:'Clearfield corn, soybean, wheat', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds', notes:'Use only on Clearfield varieties. Shorter soil residual than Pursuit. Rotational restrictions apply.' },
+      { id:'firstrate', name:'FirstRate', ai:'Cloransulam-methyl 84%', group:'2', moa:'ALS inhibitor (triazolopyrimidine)', type:'POST', formulation:'WDG', rate:'0.3–0.6 oz/ac', crops:'Soybean', phi:'See label', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds, waterhemp, Palmer amaranth (some)', notes:'No corn plantback within 9 months. Mix with NIS. Excellent value in Xtend soybean programs.' },
+      { id:'basis', name:'Basis', ai:'Rimsulfuron 50% + Thifensulfuron-methyl 25%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'0.33–0.5 oz/ac', crops:'Corn', phi:'30 days', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grass and broadleaf weeds in corn', notes:'AMS + COC adjuvant recommended. Do not use with organophosphate insecticides (injury risk). Good early post grass control.' },
+      { id:'accent-q', name:'Accent Q', ai:'Nicosulfuron 59.7%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'0.67 oz/ac', crops:'Corn', phi:'30 days', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual and perennial grasses, broadleaf weeds in corn', notes:'Excellent volunteer corn and johnsongrass control. Do not apply with organophosphate insecticides. Built-in safener.' },
+      { id:'option', name:'Option', ai:'Foramsulfuron 2.74%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'1 oz/ac', crops:'Corn', phi:'30 days', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grass weeds and some broadleaf weeds in corn', notes:'Johnsongrass and shattercane control. Contains safener isoxadifen-ethyl. COC + AMS adjuvant required.' },
+      { id:'steadfast-q', name:'Steadfast Q', ai:'Nicosulfuron 56.25% + Rimsulfuron 18.75%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'1.33 oz/ac', crops:'Corn', phi:'30 days', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual and perennial grasses, broadleaf weeds in corn', notes:'Two ALS chemistries. Excellent shattercane and johnsongrass control. Avoid organophosphate insecticide combinations.' },
+      { id:'synchrony-xp', name:'Synchrony XP', ai:'Chlorimuron-ethyl 37.5% + Thifensulfuron-methyl 37.5%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'0.4–0.6 oz/ac', crops:'Soybean', phi:'60 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds in soybean', notes:'Premix of two SUs. Flexible application window in soybean. 18-month corn rotational restriction.' },
+      { id:'amber', name:'Amber', ai:'Triasulfuron 75%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'0.28–0.56 oz/ac', crops:'Wheat, barley', phi:'See label', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual and some perennial broadleaf weeds in small grains', notes:'Apply fall or spring to small grains. NIS required. Rotational restrictions for corn, soybean, and other susceptible crops.' },
+      { id:'peak', name:'Peak', ai:'Prosulfuron 57%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'0.57 oz/ac', crops:'Corn', phi:'30 days', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds, lambsquarters, velvetleaf', notes:'Excellent lambsquarters, velvetleaf, and cocklebur control in corn. Tank-mix with grass herbicides for full spectrum control.' },
+      { id:'canopy-xt', name:'Canopy XL', ai:'Chlorimuron-ethyl 18.75% + Sulfentrazone 31.25%', group:'2 + 14', moa:'ALS + PPO inhibitor', type:'PRE', formulation:'WDG', rate:'2–4 oz/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds and some grasses in soybean', notes:'Two-mode PRE for soybean. Excellent early season broadleaf control. Corn rotational restriction 18 months from SU component.' },
+      { id:'python', name:'Python WDG', ai:'Flumetsulam 80%', group:'2', moa:'ALS inhibitor (triazolopyrimidine)', type:'PRE', formulation:'WDG', rate:'0.8–1.0 oz/ac', crops:'Corn, soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds, velvetleaf, morningglory', notes:'PRE or PRE/POST. Requires moisture within 7–10 days. Good broadleaf residual in corn and soybean.' },
+      { id:'spartan-charge', name:'Spartan Charge', ai:'Sulfentrazone 19.3% + Cloransulam-methyl 1.4%', group:'14 + 2', moa:'PPO + ALS inhibitor', type:'PRE', formulation:'SC', rate:'6.75–8.5 fl oz/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds including Palmer amaranth, waterhemp, common ragweed', notes:'Excellent PPO + ALS combination for soybean PRE. Palmer amaranth and waterhemp activity from sulfentrazone component.' },
+      { id:'valor-xlt', name:'Valor XLT', ai:'Flumioxazin 18.9% + Chlorimuron-ethyl 12.5%', group:'14 + 2', moa:'PPO + ALS inhibitor', type:'PRE', formulation:'WDG', rate:'3–4 oz/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds in soybean', notes:'Strong PPO PRE anchor + ALS for soybean programs. Good Palmer amaranth and waterhemp PRE activity.' },
+
+      /* ── Group 1: ACCase Inhibitors ── */
+      { id:'select-max', name:'Select Max', ai:'Clethodim 26.4%', group:'1', moa:'ACCase inhibitor', type:'POST', formulation:'EC', rate:'6–16 fl oz/ac', crops:'Soybean, cotton, peanuts, sunflower', phi:'See label', rei:'24 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual and perennial grass weeds', notes:'Grass-only. MSO adjuvant recommended. Do not mix with broadleaf herbicides (antagonism risk).' },
+      { id:'poast', name:'Poast', ai:'Sethoxydim 18.4%', group:'1', moa:'ACCase inhibitor', type:'POST', formulation:'EC', rate:'1–2.5 pt/ac', crops:'Soybean, cotton, peanuts, vegetables', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grass weeds', notes:'Grass-only. Crop oil concentrate (COC) required. Best in warm, actively growing grass conditions.' },
+      { id:'assure-ii', name:'Assure II', ai:'Quizalofop-p-ethyl 0.88 lb/gal', group:'1', moa:'ACCase inhibitor', type:'POST', formulation:'EC', rate:'5–12 fl oz/ac', crops:'Soybean, peanuts, sunflower', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grasses including volunteer corn', notes:'Grass-only. COC adjuvant required. Good volunteer corn control in soybean.' },
+      { id:'axial-xtra', name:'Axial XTra', ai:'Pinoxaden 6% + Clodinafop 3%', group:'1', moa:'ACCase inhibitor (aryloxyphenoxypropionate + cyclohexanedione)', type:'POST', formulation:'EC', rate:'16 fl oz/ac', crops:'Wheat, barley', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual grass weeds including wild oat, brome, ryegrass', notes:'Two ACCase chemistries. Selective in wheat and barley. Excellent annual ryegrass control. Do not use on oats.' },
+      { id:'puccini', name:'Puccini', ai:'Pinoxaden 22.9%', group:'1', moa:'ACCase inhibitor (phenylpyrazoline)', type:'POST', formulation:'EC', rate:'16 fl oz/ac', crops:'Wheat, barley', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual grass weeds in small grains', notes:'Selective in cereals. No carryover restrictions for rotational crops. Best performance under warm, growing conditions.' },
+      { id:'poast-plus', name:'Poast Plus', ai:'Sethoxydim 12.8%', group:'1', moa:'ACCase inhibitor', type:'POST', formulation:'EC', rate:'1.5–3 pt/ac', crops:'Soybean, cotton, peanuts, sunflower, vegetables', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grass weeds', notes:'Lower concentration sethoxydim. COC required. Grass-only action.' },
+      { id:'arrow-2ec', name:'Arrow 2EC', ai:'Clethodim 26.4%', group:'1', moa:'ACCase inhibitor', type:'POST', formulation:'EC', rate:'6–16 fl oz/ac', crops:'Soybean, cotton, sunflower, peanuts', phi:'See label', rei:'24 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual and perennial grasses', notes:'Generic clethodim. MSO adjuvant improves activity. Avoid broadleaf herbicide antagonism — apply separately when possible.' },
+      { id:'fusion', name:'Fusion', ai:'Fluazifop-P-butyl 12.1% + Fenoxaprop-P-ethyl 6.9%', group:'1', moa:'ACCase inhibitor (two aryloxyphenoxypropionates)', type:'POST', formulation:'EC', rate:'8–15 fl oz/ac', crops:'Soybean, peanuts, cotton, sunflower', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grasses, volunteer corn', notes:'Two-way ACCase premix. Good volunteer corn and ryegrass control. COC adjuvant required. Grass-only.' },
+
+      /* ── Group 27: HPPD Inhibitors ── */
+      { id:'callisto', name:'Callisto', ai:'Mesotrione 9.6%', group:'27', moa:'HPPD inhibitor', type:'PRE/POST', formulation:'SC', rate:'3–6 fl oz/ac', crops:'Corn', phi:'45 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds, waterhemp', notes:'Excellent waterhemp control. Temporary bleaching of corn is normal. NIS adjuvant improves POST activity.' },
+      { id:'laudis', name:'Laudis', ai:'Tembotrione 29.5%', group:'27', moa:'HPPD inhibitor', type:'POST', formulation:'Oil dispersion', rate:'3 fl oz/ac', crops:'Corn', phi:'45 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf and grass weeds in corn', notes:'Built-in safener (isoxadifen-ethyl) protects corn. Temporary whitening normal. Good on tough grasses.' },
+      { id:'balance-flexx', name:'Balance Flexx', ai:'Isoxaflutole 23.6%', group:'27', moa:'HPPD inhibitor', type:'PRE', formulation:'SC', rate:'3 fl oz/ac', crops:'Corn', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds in corn', notes:'Pre-emergence soil applied. Needs moisture for activation. Long residual. Follow state restrictions.' },
+      { id:'impact', name:'Impact', ai:'Topramezone 2.8%', group:'27', moa:'HPPD inhibitor', type:'POST', formulation:'SC', rate:'0.75–1.5 fl oz/ac', crops:'Corn', phi:'45 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds, water hemp, foxtail', notes:'Very low use rate. MSO + AMS adjuvant increases activity. Temporary crop bleaching possible.' },
+      { id:'armezon', name:'Armezon', ai:'Topramezone 3.4%', group:'27', moa:'HPPD inhibitor', type:'POST', formulation:'SC', rate:'0.75–1.5 fl oz/ac', crops:'Corn', phi:'45 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds and some grasses in corn', notes:'POST corn herbicide. MSO + AMS required. Corn bleaching (whitening) is temporary.' },
+      { id:'capreno', name:'Capreno', ai:'Tembotrione 17.5% + Thiencarbazone-methyl 3.9%', group:'27 + 2', moa:'HPPD + ALS inhibitor', type:'POST', formulation:'SC', rate:'3 fl oz/ac', crops:'Corn', phi:'45 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds and grasses, waterhemp, Palmer amaranth in corn', notes:'Two-mode premix: HPPD + ALS provides excellent spectrum. Built-in safener. Requires MSO adjuvant.' },
+      { id:'acuron', name:'Acuron', ai:'S-metolachlor 18% + Mesotrione 4.7% + Bicyclopyrone 2% + Atrazine 22.4%', group:'15 + 27 + 5', moa:'VLCFA + HPPD + PSII', type:'PRE/POST', formulation:'SC', rate:'2.5–3 qt/ac', crops:'Corn', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broad-spectrum annual grasses and broadleaf weeds in corn', notes:'Four-way premix with three modes of action. Excellent residual + POST spectrum. Atrazine annual use limits apply.' },
+      { id:'solstice', name:'Solstice', ai:'Bicyclopyrone 40%', group:'27', moa:'HPPD inhibitor (bicyclopyrone)', type:'PRE/POST', formulation:'SC', rate:'0.75–1.5 fl oz/ac', crops:'Corn', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds including waterhemp, Palmer amaranth', notes:'Novel HPPD herbicide. Longer soil residual than mesotrione. Good tankmix anchor for corn programs.' },
+
+      /* ── Group 14: PPO Inhibitors ── */
+      { id:'cobra', name:'Cobra', ai:'Lactofen 22.4%', group:'14', moa:'PPO inhibitor', type:'POST', formulation:'EC', rate:'6–12.5 fl oz/ac', crops:'Soybean', phi:'45 days', rei:'24 hr', rainfast:'4 hr', windMin:null, windMax:10, tempMin:60, tempMax:90, targetWeeds:'Broadleaf weeds: morningglory, velvetleaf, waterhemp', notes:'Contact activity — excellent coverage mandatory. Apply 60–90°F. COC required. Possible crop injury under stress. Do not exceed 12.5 fl oz/ac.' },
+      { id:'flexstar', name:'Flexstar', ai:'Fomesafen 1.88 lb/gal', group:'14', moa:'PPO inhibitor', type:'POST', formulation:'SL', rate:'1–1.25 pt/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds, waterhemp, pigweed species', notes:'Excellent waterhemp/Palmer control. Soil residual provides extended activity. 18-month corn plantback.' },
+      { id:'flexstar-gt', name:'Flexstar GT', ai:'Fomesafen + Glyphosate', group:'14 + 9', moa:'PPO + EPSPS inhibitor', type:'POST', formulation:'SL', rate:'3–3.25 pt/ac', crops:'RR soybean', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Grasses, broadleaf weeds, waterhemp', notes:'Convenient two-way premix for burndown + residual in RR soybean. One-pass program.' },
+      { id:'reflex', name:'Reflex', ai:'Fomesafen 2 lb/gal', group:'14', moa:'PPO inhibitor', type:'PRE/POST', formulation:'SL', rate:'1–1.25 pt/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Broadleaf weeds, Palmer amaranth, waterhemp', notes:'Higher concentration fomesafen. Excellent POST activity on waterhemp and Palmer. 18-month corn plantback.' },
+      { id:'ultra-blazer', name:'Ultra Blazer', ai:'Acifluorfen 2 lb/gal', group:'14', moa:'PPO inhibitor', type:'POST', formulation:'SL', rate:'0.75–1.5 pt/ac', crops:'Soybean, peanuts', phi:'See label', rei:'24 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:50, tempMax:null, targetWeeds:'Annual broadleaf weeds, morningglory, cocklebur, sicklepod', notes:'Contact activity. Good morningglory and sicklepod control. COC adjuvant required. Possible crop injury in cool or cloudy conditions.' },
+      { id:'valor-ew', name:'Valor EW', ai:'Flumioxazin 29.4%', group:'14', moa:'PPO inhibitor', type:'PRE', formulation:'EW', rate:'2–3 fl oz/ac', crops:'Soybean, corn', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds including Palmer amaranth, waterhemp, common ragweed', notes:'Strong PRE anchor for soybean programs. Corn plantback restriction. Excellent Palmer amaranth control.' },
+      { id:'sharpen', name:'Sharpen', ai:'Saflufenacil 29.7%', group:'14', moa:'PPO inhibitor', type:'PRE/POST burndown', formulation:'SC', rate:'1–3 fl oz/ac', crops:'Corn, soybean (preplant burndown), non-crop', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual broadleaf weeds, burndown of marestail, horseweed', notes:'Excellent marestail/horseweed burndown. Fast-acting contact action. Tank-mix with glyphosate improves spectrum.' },
+      { id:'goal-2xl', name:'Goal 2XL', ai:'Oxyfluorfen 2 lb/gal', group:'14', moa:'PPO inhibitor', type:'PRE/POST', formulation:'EC', rate:'0.25–1 pt/ac', crops:'Onion, garlic, rice, nursery, non-crop', phi:'See label', rei:'24 hr', rainfast:'Requires moisture for PRE', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf and grass weeds', notes:'Important PPO for specialty crops. Contact activity on emerged weeds. Also used for PRE weed control. Rice water management required.' },
+      { id:'authority-first', name:'Authority First', ai:'Sulfentrazone 39.6% + Cloransulam-methyl 3.5%', group:'14 + 2', moa:'PPO + ALS inhibitor', type:'PRE', formulation:'WDG', rate:'5.5–7.5 oz/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual broadleaf weeds, Palmer amaranth, waterhemp, giant ragweed', notes:'Two-site soybean PRE. Excellent early season broadleaf activity. Corn plantback 12 months.' },
+      { id:'zidua', name:'Zidua SC', ai:'Pyroxasulfone 85%', group:'15', moa:'VLCFA inhibitor (isoxazoline)', type:'PRE', formulation:'SC', rate:'2.5–4 fl oz/ac', crops:'Corn, soybean, wheat', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and small-seeded broadleaf weeds', notes:'Newer VLCFA chemistry — no known resistance. Long soil residual. Key component of resistance management programs.' },
+
+      /* ── Group 15: VLCFA / Chloroacetamides ── */
+      { id:'dual-magnum', name:'Dual Magnum', ai:'S-metolachlor 7.62 lb/gal', group:'15', moa:'VLCFA (cell elongation)', type:'PRE', formulation:'EC', rate:'1.33–2 pt/ac', crops:'Corn, soybean, peanuts, sorghum', phi:'See label', rei:'12 hr', rainfast:'Requires moisture for PRE activation', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and small-seeded broadleaf weeds', notes:'Soil applied. Requires rain/incorporation within 7 days. Good premix partner. Yellow foxtail activity.' },
+      { id:'harness', name:'Harness', ai:'Acetochlor 7.2 lb/gal', group:'15', moa:'VLCFA (cell elongation)', type:'PRE', formulation:'EC', rate:'1.2–2.4 pt/ac', crops:'Corn', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and small-seeded broadleaf weeds', notes:'Corn-only pre-emergence. Needs rainfall within 7 days for soil incorporation and activation.' },
+      { id:'outlook', name:'Outlook', ai:'Dimethenamid-P 6 lb/gal', group:'15', moa:'VLCFA inhibitor', type:'PRE', formulation:'EC', rate:'10–21 fl oz/ac', crops:'Corn, soybean, peanuts, sugar beet', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and small-seeded broadleaf weeds', notes:'Shorter soil persistence than metolachlor — good fit in sensitive rotations. Requires moisture for activation.' },
+      { id:'warrant', name:'Warrant', ai:'Acetochlor 3 lb/gal', group:'15', moa:'VLCFA (cell elongation)', type:'PRE', formulation:'SC', rate:'2.5–4 pt/ac', crops:'Soybean, corn', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and small-seeded broadleaf weeds', notes:'Lower rate acetochlor for soybean. Good grass residual. Needs soil moisture within 7 days.' },
+      { id:'define', name:'Define SC', ai:'Flufenacet 47.4%', group:'15', moa:'VLCFA inhibitor (oxyacetamide)', type:'PRE', formulation:'SC', rate:'14–24 fl oz/ac', crops:'Corn, wheat, rye', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses (blackgrass, ryegrass, foxtail) and small-seeded broadleaf weeds', notes:'Key component in grass-resistance programs. Flexible for use in winter and spring cereals. Also labelled for corn.' },
+      { id:'boundary-6-5ec', name:'Boundary 6.5EC', ai:'S-metolachlor 47% + Metribuzin 9.45%', group:'15 + 5', moa:'VLCFA + PSII', type:'PRE', formulation:'EC', rate:'1.5–2 pt/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds in soybean', notes:'Two-site soybean PRE premix. Flexible rates based on soil type. Avoid use on sands or soils with <1% OM.' },
+      { id:'intrro', name:'Intrro', ai:'Acetochlor 84.3%', group:'15', moa:'VLCFA (cell elongation)', type:'PRE', formulation:'EC', rate:'0.86–1.71 pt/ac', crops:'Corn', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and small-seeded broadleaf weeds in corn', notes:'High-load acetochlor formulation. Needs rainfall/moisture within 7 days. Soil-applied corn-only.' },
+
+      /* ── Group 3: Dinitroanilines ── */
+      { id:'prowl-h2o', name:'Prowl H2O', ai:'Pendimethalin 38.7%', group:'3', moa:'Microtubule inhibitor', type:'PRE', formulation:'Aqueous suspension', rate:'1.5–2 pt/ac', crops:'Corn, soybean, cotton, wheat', phi:'See label', rei:'24 hr', rainfast:'Requires light incorporation', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and some broadleaf weeds', notes:'Low-volatility aqueous formulation. Light rainfall incorporation needed. Excellent premix partner with POST burndown programs.' },
+      { id:'treflan', name:'Treflan HFP', ai:'Trifluralin 44.2%', group:'3', moa:'Microtubule inhibitor', type:'PRE-plant incorporated', formulation:'EC', rate:'1–2 pt/ac', crops:'Soybean, cotton, sunflower', phi:'See label', rei:'12 hr', rainfast:'Must be mechanically incorporated', windMin:null, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Annual grasses and small-seeded broadleaf weeds', notes:'Must be mechanically incorporated within 24 hr of application. High volatility — do not apply when temp >85°F or wind >10 mph.' },
+      { id:'sonalan', name:'Sonalan HFP', ai:'Ethalfluralin 44.2%', group:'3', moa:'Microtubule inhibitor', type:'PRE-plant incorporated', formulation:'EC', rate:'1–2 pt/ac', crops:'Soybean, sunflower, bean', phi:'See label', rei:'24 hr', rainfast:'Must be mechanically incorporated', windMin:null, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Annual grasses and small-seeded broadleaf weeds', notes:'Incorporate mechanically within 24 hr. Somewhat lower volatility than trifluralin. Avoid sandy soils.' },
+      { id:'curbit', name:'Curbit EC', ai:'Ethalfluralin 40%', group:'3', moa:'Microtubule inhibitor', type:'PRE', formulation:'EC', rate:'1–2 pt/ac', crops:'Cucurbits, squash, pumpkin', phi:'See label', rei:'24 hr', rainfast:'Requires incorporation', windMin:null, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Annual grasses and small-seeded broadleaf weeds in cucurbits', notes:'PRE for cucurbit crops. Mechanical or sprinkler incorporation required. Volatility risk at high temperatures.' },
+      { id:'trifluralin-4ec', name:'Trifluralin 4EC', ai:'Trifluralin 44.2%', group:'3', moa:'Microtubule inhibitor', type:'PRE-plant incorporated', formulation:'EC', rate:'1–2 pt/ac', crops:'Corn, soybean, cotton, sunflower, vegetables', phi:'See label', rei:'12 hr', rainfast:'Must be incorporated', windMin:null, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Annual grasses and small-seeded broadleaf weeds', notes:'Generic trifluralin. Must be mechanically incorporated within 24 hr. High volatility if left on soil surface.' },
+
+      /* ── Group 22: PSI (Paraquat/Diquat) ── */
+      { id:'gramoxone-sl', name:'Gramoxone SL 2.0', ai:'Paraquat dichloride 27.6%', group:'22', moa:'Photosystem I inhibitor', type:'POST burndown', formulation:'SL', rate:'2–3 pt/ac', crops:'Cotton, corn, soybean (burndown/layby)', phi:'See label', rei:'12 hr', rainfast:'30 min (contact)', windMin:null, windMax:10, tempMin:40, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds; contact burndown', notes:'RESTRICTED USE PESTICIDE. Requires closed cab or PPE. Contact-only action. Apply after sunrise in sunlight. No systemic activity — will not control perennials.' },
+      { id:'gramoxone-inteon', name:'Gramoxone Inteon', ai:'Paraquat dichloride 21.3%', group:'22', moa:'Photosystem I inhibitor', type:'POST burndown', formulation:'SL', rate:'2.5–4 pt/ac', crops:'Cotton, corn, soybean, tree crops (burndown)', phi:'See label', rei:'12 hr', rainfast:'30 min', windMin:null, windMax:10, tempMin:40, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds, burndown', notes:'RESTRICTED USE. Added safener reduces ingestion hazard. Contact-only. Apply in sunlight after dewdry. Requires closed cab or specified PPE.' },
+      { id:'diquat-herbicide', name:'Diquat Herbicide', ai:'Diquat dibromide 35.3%', group:'22', moa:'Photosystem I inhibitor', type:'POST burndown', formulation:'SL', rate:'0.5–1.5 pt/ac', crops:'Potato desiccation, non-crop, aquatic', phi:'See label', rei:'24 hr', rainfast:'30 min', windMin:null, windMax:10, tempMin:40, tempMax:null, targetWeeds:'Aquatic weeds, burndown, potato vine desiccation', notes:'RESTRICTED USE for some uses. Contact-only burndown. Extensively used for potato vine desiccation and aquatic weed management. No systemic activity.' },
+
+      /* ── Group 6: Benzonitriles ── */
+      { id:'buctril', name:'Buctril', ai:'Bromoxynil 2 lb/gal', group:'6', moa:'PSII inhibitor (benzonitrile)', type:'POST', formulation:'EC', rate:'1–1.5 pt/ac', crops:'Corn, wheat, sorghum, flax', phi:'30 days (corn)', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:80, targetWeeds:'Broadleaf weeds (2–4 leaf stage)', notes:'Apply to small, actively growing broadleaf weeds. Do not exceed 80°F. COC improves activity. Avoid mixing with emulsifiable concentrate formulations.' },
+      { id:'maestro-5ec', name:'Maestro 5EC', ai:'Bromoxynil 5 lb/gal', group:'6', moa:'PSII inhibitor (benzonitrile)', type:'POST', formulation:'EC', rate:'0.5–0.6 pt/ac', crops:'Corn, wheat, sorghum', phi:'30 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:80, targetWeeds:'Annual broadleaf weeds in early growth stages', notes:'Higher-load bromoxynil. Apply to small weeds for best activity. Avoid hot weather application.' },
+      { id:'bronate', name:'Bronate Advanced', ai:'Bromoxynil 20.8% + MCPA 20.8%', group:'6 + 4', moa:'PSII + synthetic auxin', type:'POST', formulation:'EC', rate:'1–1.5 pt/ac', crops:'Wheat, barley, flax', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:80, targetWeeds:'Annual broadleaf weeds in small grains', notes:'Two-mode premix for broader broadleaf spectrum. Bromoxynil handles contact burndown; MCPA adds systemic activity on harder-to-control species.' },
+
+      /* ── Group 13: DXP (Isoxazolidinone) ── */
+      { id:'command-3me', name:'Command 3ME', ai:'Clomazone 29.3%', group:'13', moa:'DXP reductoisomerase inhibitor', type:'PRE', formulation:'ME', rate:'21.3–32 fl oz/ac', crops:'Soybean, rice, cotton, pumpkin', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds', notes:'Microencapsulated to reduce off-target movement. Causes whitening/bleaching of off-target susceptible plants. Needs moisture within 7 days. Do not apply near tobacco, tomato, or other susceptible crops.' },
+      { id:'commence', name:'Commence', ai:'Trifluralin 40% + Clomazone 6%', group:'3 + 13', moa:'Microtubule + DXP inhibitor', type:'PRE-plant incorporated', formulation:'EC', rate:'2–2.5 pt/ac', crops:'Soybean', phi:'See label', rei:'24 hr', rainfast:'Must be incorporated', windMin:null, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Annual grasses and broadleaf weeds in soybean', notes:'Two-site PRE premix. Requires mechanical incorporation like trifluralin component. Clomazone adds broader broadleaf spectrum.' },
+
+      /* ── Burndown / Non-selective Non-crop ── */
+      { id:'krenite-s', name:'Krenite S', ai:'Fosamine-ammonium 48%', group:'Un', moa:'Inhibits bud development', type:'POST', formulation:'SL', rate:'1–2 gal/ac', crops:'Non-crop, rights-of-way, brush control', phi:'N/A', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:50, tempMax:null, targetWeeds:'Woody plants and brush', notes:'Slow-acting brush control. Apply late summer for control the following season. No soil residual activity.' },
+
+      /* ── Premixes ── */
+      { id:'halex-gt', name:'Halex GT', ai:'S-metolachlor + Mesotrione + Glyphosate', group:'15 + 27 + 9', moa:'VLCFA + HPPD + EPSPS', type:'PRE/POST', formulation:'SC', rate:'2.6–3.6 pt/ac', crops:'RR corn', phi:'See label', rei:'12 hr', rainfast:'4 hr (POST)', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Broad-spectrum grasses and broadleaf weeds', notes:'Three-way premix for corn. Apply pre or early post-emergence. Soil residual from metolachlor and mesotrione components.' },
+      { id:'prefix', name:'Prefix', ai:'S-metolachlor 44.4% + Fomesafen 12.1%', group:'15 + 14', moa:'VLCFA + PPO inhibitor', type:'PRE', formulation:'SC', rate:'2–2.5 pt/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds including waterhemp, Palmer amaranth', notes:'Two-site activity improves resistance management. Excellent soybean residual program. Corn plantback: 18 months.' },
+      { id:'warrant-ultra', name:'Warrant Ultra', ai:'Acetochlor 34.3% + Fomesafen 16%', group:'15 + 14', moa:'VLCFA + PPO inhibitor', type:'PRE', formulation:'SC', rate:'2.5–3.5 pt/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds, waterhemp, Palmer amaranth', notes:'Strong waterhemp program. Corn rotational restriction: 12 months.' },
+      { id:'sequence', name:'Sequence', ai:'S-metolachlor 28.7% + Glyphosate 28.3%', group:'15 + 9', moa:'VLCFA + EPSPS inhibitor', type:'PRE/POST', formulation:'SC', rate:'3–3.75 pt/ac', crops:'RR corn, soybean', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds', notes:'Convenient premix combining PRE residual with POST burndown. Apply pre or early post-emergence.' },
+      { id:'corvus', name:'Corvus', ai:'Isoxaflutole 29.5% + Thiencarbazone-methyl 11%', group:'27 + 2', moa:'HPPD + ALS inhibitor', type:'PRE', formulation:'SC', rate:'3.5 fl oz/ac', crops:'Corn', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds in corn', notes:'Two-mode corn PRE. Long residual from isoxaflutole + ALS activity. Excellent grass and broadleaf spectrum.' },
+      { id:'verdict', name:'Verdict', ai:'Saflufenacil 6.25% + Dimethenamid-P 62.5%', group:'14 + 15', moa:'PPO + VLCFA inhibitor', type:'PRE/POST burndown', formulation:'SC', rate:'6 fl oz/ac', crops:'Corn, soybean (PRE/burndown)', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Marestail, annual grasses, broadleaf weeds', notes:'Two-mode premix. Saflufenacil provides fast contact burndown; dimethenamid-P adds residual grass control.' },
+      { id:'resicore', name:'Resicore', ai:'Acetochlor 29.1% + Mesotrione 4.9% + Clopyralid 2.6%', group:'15 + 27 + 4', moa:'VLCFA + HPPD + Synthetic auxin', type:'PRE/POST', formulation:'SC', rate:'2.5–3 pt/ac', crops:'Corn', phi:'45 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual grasses, broadleaf weeds, thistle in corn', notes:'Three-mode premix with excellent corn spectrum. Clopyralid adds thistle and clover control. Requires 7-day moisture for PRE component.' },
+      { id:'status', name:'Status', ai:'Dicamba 18.7% + Diflufenzopyr 3.6%', group:'4 + 19', moa:'Synthetic auxin + Auxin transport inhibitor', type:'POST', formulation:'WDG', rate:'5 oz/ac', crops:'Corn', phi:'See label', rei:'24 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:85, targetWeeds:'Annual and perennial broadleaf weeds in corn', notes:'Diflufenzopyr enhances dicamba uptake. Apply to small weeds. Avoid high-temp applications. Good annual and perennial broadleaf spectrum in corn.' },
+      { id:'tervigo', name:'Realm Q', ai:'Rimsulfuron 21% + Mesotrione 22.1%', group:'2 + 27', moa:'ALS + HPPD inhibitor', type:'POST', formulation:'WDG', rate:'3.5 oz/ac', crops:'Corn', phi:'45 days', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds in corn', notes:'Two-mode POST premix for corn. MSO or COC adjuvant + AMS required. Do not apply with organophosphate insecticides.' },
+      { id:'autumn-super', name:'Autumn Super', ai:'Thifensulfuron-methyl 15% + Tribenuron-methyl 15% + Florasulam 5%', group:'2', moa:'ALS inhibitor (three sulfonylureas/sulfonanilides)', type:'POST', formulation:'WDG', rate:'0.75–1.5 oz/ac', crops:'Wheat, barley', phi:'See label', rei:'4 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Broadleaf weeds in small grains', notes:'Three-component ALS for broad broadleaf spectrum in cereals. Fast acting. NIS recommended.' },
+      { id:'afforia', name:'Afforia', ai:'Thifensulfuron-methyl 26.3% + Florasulam 5.3%', group:'2', moa:'ALS inhibitor (sulfonylurea + triazolopyrimidine)', type:'POST', formulation:'WDG', rate:'0.75–1.5 oz/ac', crops:'Wheat, barley', phi:'See label', rei:'4 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Broadleaf weeds in small grains', notes:'Two-mode ALS premix. Florasulam adds activity on chickweed and speedwells. NIS required.' },
+      { id:'everest-30-wdg', name:'Everest 3.0 WDG', ai:'Flucarbazone-sodium 70%', group:'2', moa:'ALS inhibitor (sulfonylaminocarbonyltriazolinone)', type:'POST', formulation:'WDG', rate:'0.133 oz/ac', crops:'Wheat, barley', phi:'See label', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Wild oat, jointed goatgrass, and some broadleaf weeds in wheat', notes:'Very low use rate. Excellent jointed goatgrass control in wheat. NIS + AMS required. Winter and spring wheat registered.' },
+      { id:'olympus-flex', name:'Olympus Flex', ai:'Propoxycarbazone-sodium 65%', group:'2', moa:'ALS inhibitor (sulfonylaminocarbonyltriazolinone)', type:'POST', formulation:'WDG', rate:'0.5–0.75 oz/ac', crops:'Wheat', phi:'See label', rei:'4 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Jointed goatgrass, feral rye, downy brome in wheat', notes:'Selective grass control in wheat. Key tool for jointed goatgrass. Rotational restrictions — follow label for soybean plantback timing.' },
+      { id:'matador', name:'Matador', ai:'Cloquintocet-mexyl 3.1% + Clodinafop 7.5%', group:'1', moa:'ACCase inhibitor + safener', type:'POST', formulation:'WDG', rate:'1.5 oz/ac', crops:'Wheat', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Wild oat, annual ryegrass in wheat', notes:'ACCase grass killer for wheat. Safener ensures crop tolerance. Do not apply to stressed wheat.' },
+      { id:'survive', name:'Survive', ai:'Thifensulfuron-methyl 50% + Tribenuron-methyl 25%', group:'2', moa:'ALS inhibitor (sulfonylurea)', type:'POST', formulation:'WDG', rate:'0.5–1 oz/ac', crops:'Wheat, barley', phi:'See label', rei:'4 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual broadleaf weeds in cereals', notes:'Two ALS SUs for small grain broadleaf control. NIS required. Rotational restrictions for soybean and corn.' },
+      { id:'quelex', name:'Quelex', ai:'Halauxifen-methyl 4.2% + Florasulam 7%', group:'4 + 2', moa:'Synthetic auxin + ALS inhibitor', type:'POST', formulation:'WDG', rate:'0.5 oz/ac', crops:'Wheat, barley', phi:'See label', rei:'4 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Broadleaf weeds including kochia, wild buckwheat, morningglory in small grains', notes:'Novel arylpicolinate auxin + ALS. Excellent kochia and wild buckwheat. NIS required. Rapid uptake in cool weather.' },
+      { id:'xtend-flex-burndown', name:'Tavium Plus VaporGrip', ai:'S-metolachlor 32% + Dicamba (DGA+VG) 22.4%', group:'15 + 4', moa:'VLCFA + Synthetic auxin', type:'PRE/POST', formulation:'SC', rate:'57–68 fl oz/ac', crops:'RR2 Xtend soybean', phi:'See label', rei:'24 hr', rainfast:'4 hr', windMin:3, windMax:10, tempMin:null, tempMax:85, targetWeeds:'Annual grasses, broadleaf weeds, resistant waterhemp, Palmer amaranth', notes:'Dicamba + metolachlor premix for Xtend soybeans. Same 3–10 mph wind and ≤85°F requirements as stand-alone dicamba products. 110 ft downwind buffer.' },
+      { id:'trivita', name:'TriVita 20EW', ai:'Pyroxsulam 7.03% + Florasulam 2.34% + Halauxifen-methyl 0.94%', group:'2 + 4', moa:'ALS + Synthetic auxin (arylpicolinate)', type:'POST', formulation:'EW', rate:'1.7 fl oz/ac', crops:'Wheat', phi:'See label', rei:'4 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual grass and broadleaf weeds including winter annual grasses in wheat', notes:'Three-active premix for wheat. Pyroxsulam adds winter annual grass activity. NIS required. Excellent spectrum for tough-to-control species.' },
+      { id:'fierce-xlt', name:'Fierce XLT', ai:'Flumioxazin 31.3% + Pyroxasulfone 41.7%', group:'14 + 15', moa:'PPO + VLCFA inhibitor', type:'PRE', formulation:'WDG', rate:'3–4 oz/ac', crops:'Soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds including Palmer amaranth, waterhemp, ryegrass', notes:'Strong two-site soybean PRE. Pyroxasulfone adds excellent grass control. Key for resistance management. Needs moisture for activation.' },
+      { id:'trivita-soybean', name:'Anthem Maxx', ai:'Fluthiacet-methyl 1.96% + Pyroxasulfone 48%', group:'14 + 15', moa:'PPO + VLCFA inhibitor', type:'PRE', formulation:'SC', rate:'4–6 fl oz/ac', crops:'Corn, soybean', phi:'See label', rei:'12 hr', rainfast:'Requires moisture', windMin:null, windMax:15, tempMin:null, tempMax:null, targetWeeds:'Annual grasses and broadleaf weeds in corn and soybean', notes:'Two-mode PRE/early POST. Fluthiacet-methyl provides contact PPO activity on emerged weeds; pyroxasulfone adds residual grass control.' },
+      { id:'reviton', name:'Reviton', ai:'Tiafenacil 20%', group:'14', moa:'PPO inhibitor (novel)', type:'POST burndown', formulation:'SC', rate:'1.5–3 fl oz/ac', crops:'Non-crop, corn/soybean (burndown)', phi:'See label', rei:'12 hr', rainfast:'4 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual broadleaf and grass weeds, marestail, Palmer amaranth', notes:'Novel PPO for burndown. Fast-acting contact activity. Tank-mix with residual herbicide for resistance management.' },
+      { id:'kyro', name:'Kyro', ai:'Quizalofop-p-ethyl 3.95%', group:'1', moa:'ACCase inhibitor', type:'POST', formulation:'EW', rate:'16–24 fl oz/ac', crops:'Soybean, cotton, peanuts, sunflower', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grasses including volunteer corn', notes:'Grass-only ACCase. Good volunteer corn and barnyardgrass control. COC adjuvant recommended.' },
+      { id:'interlock', name:'Interlock', ai:'Clethodim 9% + Quizalofop-P-ethyl 0.97%', group:'1', moa:'ACCase inhibitor (two chemistries)', type:'POST', formulation:'EC', rate:'16–24 fl oz/ac', crops:'Soybean, cotton, sunflower', phi:'See label', rei:'12 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Annual and perennial grasses', notes:'Two-ACCase premix for broad grass control. MSO adjuvant recommended. Grass-only action.' },
+      { id:'elevore', name:'Elevore', ai:'Halauxifen-methyl 50%', group:'4', moa:'Synthetic auxin (arylpicolinate)', type:'POST', formulation:'WDG', rate:'0.15–0.22 oz/ac', crops:'Wheat, barley, oat, triticale', phi:'See label', rei:'4 hr', rainfast:'1 hr', windMin:null, windMax:15, tempMin:40, tempMax:null, targetWeeds:'Broadleaf weeds including kochia, marestail, morningglory in small grains', notes:'Novel class of auxin herbicides. Rapid absorption in cool weather. Mix with NIS. Low volatility risk compared to traditional auxins.' },
+    ];
+
+    /* ─── Label compliance check ─────────────────────────────── */
+    function checkLabelCompliance(herb, windSpeed, tempF, rain2h) {
+      const checks = [];
+      /* Wind max */
+      if (herb.windMax != null) {
+        const pass = windSpeed <= herb.windMax;
+        checks.push({ label:'Wind speed', value:`${Math.round(windSpeed)} mph`, limit:`Label max: ≤${herb.windMax} mph`, pass });
+      }
+      /* Wind min (dicamba inversion requirement) */
+      if (herb.windMin != null) {
+        const pass = windSpeed >= herb.windMin;
+        checks.push({ label:'Min. wind (inversion)', value:`${Math.round(windSpeed)} mph`, limit:`Label min: ≥${herb.windMin} mph`, pass });
+      }
+      /* Temp min */
+      if (herb.tempMin != null) {
+        const pass = tempF >= herb.tempMin;
+        checks.push({ label:'Min. temperature', value:`${Math.round(tempF)}°F`, limit:`Label min: ≥${herb.tempMin}°F`, pass });
+      }
+      /* Temp max */
+      if (herb.tempMax != null) {
+        const pass = tempF <= herb.tempMax;
+        checks.push({ label:'Max. temperature', value:`${Math.round(tempF)}°F`, limit:`Label max: ≤${herb.tempMax}°F`, pass });
+      }
+      /* Rainfast window */
+      const rainfastPass = rain2h < 40;
+      checks.push({ label:'Rainfast window', value: rainfastPass ? 'No rain in 2 hrs' : 'Rain likely < 2 hrs', limit:`Requires ${herb.rainfast} before rain`, pass: rainfastPass });
+      return checks;
+    }
+
+    /* ─── Herbicide Card ─────────────────────────────────────── */
+    const GROUP_COLORS = {
+      '1':'#f97316','2':'#a78bfa','3':'#fb923c','4':'#f472b6',
+      '5':'#60a5fa','6':'#34d399','9':'#4ade80','10':'#facc15',
+      '14':'#f87171','15':'#38bdf8','22':'#ef4444','27':'#c084fc',
+    };
+    function groupColor(g) {
+      const first = (g||'').split(/[+\s]/)[0].trim();
+      return GROUP_COLORS[first] || '#94a3b8';
+    }
+
+    function HerbicideCard({ herb, onRemove, weather, curTemp, curWind, rain2h }) {
+      const [expanded, setExpanded] = React.useState(false);
+      const gc = groupColor(herb.group);
+      const compliance = weather ? checkLabelCompliance(herb, curWind, curTemp, rain2h) : null;
+      const allPass = compliance ? compliance.every(c => c.pass) : null;
+      const anyFail = compliance ? compliance.some(c => !c.pass) : null;
+
+      return (
+        <div className="frost" style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.11)', borderRadius:16, overflow:'hidden', boxShadow:'0 4px 24px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.07)' }}>
+          {/* Header bar */}
+          <div style={{ padding:'14px 18px', display:'flex', alignItems:'flex-start', gap:12, flexWrap:'wrap' }}>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', marginBottom:4 }}>
+                <span style={{ background:`${gc}22`, border:`1px solid ${gc}55`, color:gc, fontSize:10, fontWeight:800, letterSpacing:1.5, padding:'2px 7px', borderRadius:5, textTransform:'uppercase', whiteSpace:'nowrap' }}>
+                  Group {herb.group}
+                </span>
+                <span style={{ background:'rgba(255,255,255,0.08)', border:'1px solid rgba(255,255,255,0.12)', color:'rgba(255,255,255,0.6)', fontSize:10, fontWeight:700, letterSpacing:1, padding:'2px 7px', borderRadius:5, textTransform:'uppercase' }}>
+                  {herb.type}
+                </span>
+                {compliance && (
+                  <span style={{ background: allPass ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)', border:`1px solid ${allPass ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)'}`, color: allPass ? '#4ade80' : '#f87171', fontSize:10, fontWeight:800, letterSpacing:1, padding:'2px 8px', borderRadius:5 }}>
+                    {allPass ? '✓ LABEL OK' : '⚠ CHECK LABEL'}
+                  </span>
+                )}
+              </div>
+              <div style={{ color:'#f0f4ec', fontSize:17, fontWeight:800, lineHeight:1.2 }}>{herb.name}</div>
+              <div style={{ color:'rgba(255,255,255,0.45)', fontSize:12, marginTop:3 }}>{herb.ai}</div>
+            </div>
+            <div style={{ display:'flex', gap:8, alignItems:'center', flexShrink:0 }}>
+              <button onClick={() => setExpanded(e => !e)} style={{ background:'rgba(255,255,255,0.07)', border:'1px solid rgba(255,255,255,0.12)', borderRadius:8, padding:'5px 12px', color:'rgba(255,255,255,0.7)', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:'inherit' }}>
+                {expanded ? 'Less ▲' : 'Details ▼'}
+              </button>
+              <a href={`https://www.greenbook.net/search?q=${encodeURIComponent(herb.name)}`} target="_blank" rel="noopener noreferrer" style={{ background:'rgba(255,255,255,0.07)', border:'1px solid rgba(255,255,255,0.12)', borderRadius:8, padding:'5px 12px', color:'rgba(255,255,255,0.7)', fontSize:12, fontWeight:600, textDecoration:'none', whiteSpace:'nowrap' }}>
+                Greenbook ↗
+              </a>
+              <button onClick={() => onRemove(herb.id)} style={{ background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.25)', borderRadius:8, padding:'5px 10px', color:'#f87171', fontSize:14, cursor:'pointer', fontFamily:'inherit', lineHeight:1 }}>✕</button>
+            </div>
+          </div>
+
+          {/* Label compliance check strip (always visible when weather loaded) */}
+          {compliance && (
+            <div style={{ margin:'0 18px 14px', background: anyFail ? 'rgba(239,68,68,0.06)' : 'rgba(34,197,94,0.06)', border:`1px solid ${anyFail ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)'}`, borderRadius:10, padding:'10px 14px' }}>
+              <p style={{ margin:'0 0 8px', color:'rgba(255,255,255,0.4)', fontSize:10, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase' }}>
+                Label Conditions — Current Weather
+              </p>
+              <div style={{ display:'flex', flexWrap:'wrap', gap:8 }}>
+                {compliance.map((c,i) => (
+                  <div key={i} style={{ display:'flex', alignItems:'center', gap:6, background: c.pass ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.12)', border:`1px solid ${c.pass ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.35)'}`, borderRadius:8, padding:'5px 10px', minWidth:0 }}>
+                    <span style={{ color: c.pass ? '#4ade80' : '#f87171', fontWeight:800, fontSize:13 }}>{c.pass ? '✓' : '✕'}</span>
+                    <div>
+                      <div style={{ color:'rgba(255,255,255,0.5)', fontSize:9, fontWeight:700, textTransform:'uppercase', letterSpacing:1 }}>{c.label}</div>
+                      <div style={{ color:'#fff', fontSize:12, fontWeight:700 }}>{c.value}</div>
+                      <div style={{ color:'rgba(255,255,255,0.35)', fontSize:10 }}>{c.limit}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Expanded details */}
+          {expanded && (
+            <div style={{ margin:'0 18px 18px', display:'flex', flexDirection:'column', gap:12 }}>
+              {/* Quick specs */}
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))', gap:8 }}>
+                {[
+                  ['⚗️','MOA',herb.moa],
+                  ['💧','Formulation',herb.formulation],
+                  ['📐','App. Rate',herb.rate],
+                  ['🌾','Crops',herb.crops],
+                  ['⏱️','REI',herb.rei],
+                  ['📅','PHI',herb.phi],
+                  ['🌧️','Rainfast',herb.rainfast],
+                ].map(([icon,k,v]) => (
+                  <div key={k} className="frost-light" style={{ background:'rgba(255,255,255,0.04)', border:'1px solid rgba(255,255,255,0.08)', borderRadius:8, padding:'8px 10px' }}>
+                    <div style={{ color:'rgba(255,255,255,0.35)', fontSize:9, fontWeight:700, textTransform:'uppercase', letterSpacing:1, marginBottom:2 }}>{icon} {k}</div>
+                    <div style={{ color:'rgba(255,255,255,0.85)', fontSize:11, fontWeight:500, lineHeight:1.4 }}>{v}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Target weeds */}
+              <div style={{ background:'rgba(255,255,255,0.04)', borderRadius:8, padding:'10px 12px', border:'1px solid rgba(255,255,255,0.08)' }}>
+                <div style={{ color:'rgba(255,255,255,0.35)', fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:1, marginBottom:4 }}>🎯 Target Weeds</div>
+                <div style={{ color:'rgba(255,255,255,0.75)', fontSize:12, lineHeight:1.5 }}>{herb.targetWeeds}</div>
+              </div>
+              {/* Notes */}
+              <div style={{ background:'rgba(255,255,255,0.04)', borderRadius:8, padding:'10px 12px', border:'1px solid rgba(255,255,255,0.08)' }}>
+                <div style={{ color:'rgba(255,255,255,0.35)', fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:1, marginBottom:4 }}>📋 Label Notes</div>
+                <div style={{ color:'rgba(255,255,255,0.75)', fontSize:12, lineHeight:1.5 }}>{herb.notes}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ─── Herbicide Selector ─────────────────────────────────── */
+    function HerbicideSelector({ selected, onAdd, onRemove, weather, curTemp, curWind, rain2h }) {
+      const [q, setQ]             = React.useState('');
+      const [sugs, setSugs]       = React.useState([]);
+      const [open, setOpen]       = React.useState(false);
+      const [activeI, setActiveI] = React.useState(-1);
+      const wrapRef               = React.useRef(null);
+
+      React.useEffect(() => {
+        const term = q.trim().toLowerCase();
+        if (term.length < 1) { setSugs([]); setOpen(false); return; }
+        const hits = HERBICIDE_DB.filter(h =>
+          !selected.find(s => s.id === h.id) &&
+          (h.name.toLowerCase().includes(term) ||
+           h.ai.toLowerCase().includes(term)  ||
+           h.moa.toLowerCase().includes(term) ||
+           h.targetWeeds.toLowerCase().includes(term))
+        ).slice(0, 8);
+        setSugs(hits);
+        setOpen(hits.length > 0);
+        setActiveI(-1);
+      }, [q, selected]);
+
+      React.useEffect(() => {
+        function out(e) { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); }
+        document.addEventListener('mousedown', out);
+        return () => document.removeEventListener('mousedown', out);
+      }, []);
+
+      const pick = (h) => { onAdd(h); setQ(''); setSugs([]); setOpen(false); };
+
+      const onKey = (e) => {
+        if (!open || !sugs.length) return;
+        if (e.key === 'ArrowDown')  { e.preventDefault(); setActiveI(i => Math.min(i+1, sugs.length-1)); }
+        if (e.key === 'ArrowUp')    { e.preventDefault(); setActiveI(i => Math.max(i-1, 0)); }
+        if (e.key === 'Enter')      { e.preventDefault(); if (activeI >= 0) pick(sugs[activeI]); }
+        if (e.key === 'Escape')     { setOpen(false); }
+      };
+
+      return (
+        <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+          {/* Section header */}
+          <p style={{ margin:0, color:'rgba(255,255,255,0.4)', fontSize:11, fontWeight:700, letterSpacing:2, textTransform:'uppercase' }}>
+            Herbicide Selection
+          </p>
+
+          {/* Search input */}
+          <div ref={wrapRef} style={{ position:'relative' }}>
+            <input
+              type="text" value={q} autoComplete="off"
+              onChange={e => { setQ(e.target.value); setOpen(true); }}
+              onKeyDown={onKey}
+              onFocus={() => { if (sugs.length > 0) setOpen(true); }}
+              placeholder="Search by product name, active ingredient, or target weed…"
+              style={{ width:'100%', background:'rgba(0,0,0,0.18)', backdropFilter:'blur(8px)', WebkitBackdropFilter:'blur(8px)', border:'1px solid rgba(255,255,255,0.14)', borderRadius:12, padding:'10px 16px', color:'#fff', fontSize:14, outline:'none', fontFamily:'inherit', boxSizing:'border-box' }}
+              onFocus2={e => { e.target.style.borderColor='rgba(255,255,255,0.35)'; e.target.style.boxShadow='0 0 0 3px rgba(255,255,255,0.06)'; }}
+            />
+            {/* Dropdown */}
+            {open && sugs.length > 0 && (
+              <div style={{ position:'absolute', top:'calc(100% + 6px)', left:0, right:0, background:'rgba(6,8,7,0.92)', backdropFilter:'blur(28px) saturate(1.6)', WebkitBackdropFilter:'blur(28px) saturate(1.6)', border:'1px solid rgba(255,255,255,0.13)', borderRadius:12, overflow:'hidden', boxShadow:'0 8px 40px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.06)', zIndex:200 }}>
+                {sugs.map((h, i) => {
+                  const gc = groupColor(h.group);
+                  return (
+                    <div key={h.id} onMouseDown={() => pick(h)} onMouseEnter={() => setActiveI(i)}
+                      style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 16px', cursor:'pointer', background: i===activeI ? 'rgba(255,255,255,0.07)' : 'transparent', borderBottom: i < sugs.length-1 ? '1px solid rgba(255,255,255,0.06)' : 'none' }}>
+                      <span style={{ background:`${gc}22`, border:`1px solid ${gc}44`, color:gc, fontSize:9, fontWeight:800, padding:'2px 6px', borderRadius:4, letterSpacing:1, whiteSpace:'nowrap' }}>G{h.group}</span>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ color:'#f0f4ec', fontSize:13, fontWeight:700, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{h.name}</div>
+                        <div style={{ color:'rgba(255,255,255,0.4)', fontSize:11, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{h.ai}</div>
+                      </div>
+                      <span style={{ color:'rgba(255,255,255,0.25)', fontSize:10, whiteSpace:'nowrap', flexShrink:0 }}>{h.type}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {open && q.trim().length >= 1 && sugs.length === 0 && (
+              <div style={{ position:'absolute', top:'calc(100% + 6px)', left:0, right:0, background:'rgba(6,8,7,0.92)', backdropFilter:'blur(28px)', WebkitBackdropFilter:'blur(28px)', border:'1px solid rgba(255,255,255,0.12)', borderRadius:12, padding:'12px 16px', zIndex:200, boxShadow:'0 8px 32px rgba(0,0,0,0.5)' }}>
+                <span style={{ color:'rgba(255,255,255,0.4)', fontSize:13 }}>No products found for "<strong style={{color:'rgba(255,255,255,0.65)'}}>{q}</strong>"</span>
+              </div>
+            )}
+          </div>
+
+          {/* No selections hint */}
+          {selected.length === 0 && (
+            <p style={{ margin:0, color:'rgba(255,255,255,0.25)', fontSize:13, textAlign:'center', padding:'8px 0' }}>
+              Search above to add herbicides — label conditions will be checked against current weather.
+            </p>
+          )}
+
+          {/* Selected herbicide cards */}
+          {selected.length > 0 && (
+            <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+              {selected.map(h => (
+                <HerbicideCard key={h.id} herb={h} onRemove={onRemove} weather={weather} curTemp={curTemp} curWind={curWind} rain2h={rain2h} />
+              ))}
+            </div>
+          )}
+
+          {/* Disclaimer */}
+          <p style={{ margin:0, color:'rgba(255,255,255,0.18)', fontSize:11, lineHeight:1.5, textAlign:'center' }}>
+            Product data sourced from manufacturer labels and the{' '}
+            <a href="https://www.greenbook.net" target="_blank" rel="noopener noreferrer" style={{ color:'rgba(255,255,255,0.35)', textDecoration:'none' }}>Greenbook.net</a>{' '}
+            database. Always read and follow the current pesticide label — it is the law.
+          </p>
+        </div>
+      );
+    }
+
+    function SprayRecommendations({ windSpeed, status, selectedHerbs = [] }) {
+      /* ── Tank-mix volatility analysis ── */
+      const dicambaHerbs = selectedHerbs.filter(h =>
+        h.moa && h.moa.toLowerCase().includes('dicamba')
+      );
+      const esterAuxinHerbs = selectedHerbs.filter(h =>
+        h.group && h.group.includes('4') &&
+        !h.moa.toLowerCase().includes('dicamba') &&
+        (h.ai.toLowerCase().includes('ester') ||
+          (h.formulation && h.formulation.toLowerCase() === 'ec' && h.moa.toLowerCase().includes('2,4-d')))
+      );
+      const isDicamba  = dicambaHerbs.length > 0;
+      const is24DEster = esterAuxinHerbs.length > 0;
+      const isVolatile = isDicamba || is24DEster;
+
+      /* ── Select nozzle tier: volatile Group 4 products get their own label-specific tiers ── */
+      const baseTier = windSpeed < 7 ? 'low' : windSpeed < 10 ? 'moderate' : 'high';
+      const effectiveTier = isDicamba ? 'dicamba' : is24DEster ? 'ester' : baseTier;
+      const wasEscalated  = effectiveTier !== baseTier;
+      const rec = NOZZLE_RECS[effectiveTier];
+
+      /* ── Dicamba-specific wind window compliance flags ── */
+      const dicambaWindTooLow  = isDicamba && windSpeed < 3;
+      const dicambaWindTooHigh = isDicamba && windSpeed > 10;
+      const dicambaOutOfWindow = dicambaWindTooLow || dicambaWindTooHigh;
+
+      /* Tips: Group 4 tiers have all requirements built in; combine nothing extra */
+      const combinedTips = rec.tips;
+
+      /* GPA bar — visual fill */
+      const gpaFill = Math.min(((rec.gpa.ideal.split('–')[0] - 5) / 20) * 100, 100);
+
+      return (
+        <div style={{ display:'flex', flexDirection:'column', gap: 16 }}>
+
+          {/* Section header */}
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap: 8 }}>
+            <p style={{ margin:0, color:'rgba(240,244,236,0.5)', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform:'uppercase' }}>
+              Nozzle & Application Recommendations
+            </p>
+            <div style={{ display:'flex', gap: 8, flexWrap:'wrap', alignItems:'center' }}>
+              {isVolatile && (
+                <span style={{
+                  background: isDicamba ? 'rgba(239,68,68,0.15)' : 'rgba(251,146,60,0.12)',
+                  border: `1px solid ${isDicamba ? 'rgba(239,68,68,0.5)' : 'rgba(251,146,60,0.45)'}`,
+                  color: isDicamba ? '#f87171' : '#fb923c',
+                  fontSize: 10, fontWeight: 800,
+                  padding: '4px 10px', borderRadius: 20, letterSpacing: 0.5, textTransform:'uppercase'
+                }}>
+                  {isDicamba ? 'Dicamba Label Mode' : '2,4-D Ester Mode'}
+                </span>
+              )}
+              <span style={{
+                background: rec.tierBg, border: `1px solid ${rec.tierBorder}`,
+                color: rec.tierColor, fontSize: 11, fontWeight: 700,
+                padding: '4px 12px', borderRadius: 20, letterSpacing: 0.5
+              }}>
+                {isVolatile ? rec.windLabel : `Wind ${rec.windLabel} · ${rec.tier}`}
+              </span>
+            </div>
+          </div>
+
+          {/* ── Dicamba wind window OUT-OF-RANGE banner ── */}
+          {dicambaOutOfWindow && (
+            <div style={{
+              background:'rgba(239,68,68,0.12)', border:'1px solid rgba(239,68,68,0.55)',
+              borderRadius: 14, padding: '14px 18px', display:'flex', gap: 12, alignItems:'flex-start'
+            }}>
+              <span style={{ fontSize: 22, flexShrink: 0 }}>🚫</span>
+              <div>
+                <p style={{ margin:'0 0 4px', color:'#f87171', fontSize: 14, fontWeight: 800 }}>
+                  {dicambaWindTooLow
+                    ? `Wind ${windSpeed.toFixed(1)} mph — TOO CALM for dicamba application`
+                    : `Wind ${windSpeed.toFixed(1)} mph — EXCEEDS dicamba label limit (10 mph max)`}
+                </p>
+                <p style={{ margin:0, color:'rgba(240,244,236,0.65)', fontSize: 12, lineHeight: 1.5 }}>
+                  {dicambaWindTooLow
+                    ? 'Calm or near-calm conditions indicate a potential temperature inversion. Dicamba vapor can concentrate near the soil surface and travel miles off-target. Do NOT apply until wind reaches 3 mph with a consistent direction.'
+                    : 'Current wind exceeds the dicamba label maximum of 10 mph. Application is not permitted. Wait for wind to decrease to the 3–10 mph window before proceeding.'}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* ── Tank-mix volatility info banner ── */}
+          {isVolatile && (
+            <div style={{
+              background: isDicamba ? 'rgba(239,68,68,0.07)' : 'rgba(251,146,60,0.07)',
+              border: `1px solid ${isDicamba ? 'rgba(239,68,68,0.3)' : 'rgba(251,146,60,0.3)'}`,
+              borderRadius: 14, padding: '14px 18px',
+              display:'flex', flexDirection:'column', gap: 10
+            }}>
+              <div style={{ display:'flex', alignItems:'flex-start', gap: 12 }}>
+                <span style={{ fontSize: 18, flexShrink: 0, marginTop: 1 }}>{isDicamba ? '⚠️' : '🌡️'}</span>
+                <div>
+                  <p style={{ margin:'0 0 4px', color: isDicamba ? '#f87171' : '#fb923c', fontSize: 13, fontWeight: 800, lineHeight: 1.3 }}>
+                    {isDicamba
+                      ? 'Dicamba in tank — recommendations are now label-specific (TTI / AITTJ required)'
+                      : '2,4-D ester in tank — volatility-risk nozzle protocol active'}
+                  </p>
+                  <p style={{ margin:0, color:'rgba(240,244,236,0.55)', fontSize: 11, lineHeight: 1.5 }}>
+                    {isDicamba
+                      ? 'Current dicamba labels (XtendiMax, Engenia, FeXapan) require nozzles producing a minimum of Extremely Coarse (XC) droplets from the approved nozzle list. Standard flat-fan or AIXR nozzles are not label-compliant for these products.'
+                      : 'Ester formulations of 2,4-D volatilize readily in warm conditions. Air-induction nozzles (AIXR minimum, TTI preferred ≥ 75°F) are required to minimize the fine droplet fraction available for vapor-phase off-target movement.'}
+                  </p>
+                </div>
+              </div>
+              <div style={{ display:'flex', gap: 6, flexWrap:'wrap', paddingTop: 4, borderTop:'1px solid rgba(255,255,255,0.07)' }}>
+                <span style={{ color:'rgba(240,244,236,0.35)', fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform:'uppercase', alignSelf:'center' }}>Triggered by:</span>
+                {[...dicambaHerbs, ...esterAuxinHerbs].map(h => (
+                  <span key={h.id} style={{
+                    background: isDicamba ? 'rgba(239,68,68,0.15)' : 'rgba(251,146,60,0.15)',
+                    border: `1px solid ${isDicamba ? 'rgba(239,68,68,0.35)' : 'rgba(251,146,60,0.35)'}`,
+                    color: isDicamba ? '#fca5a5' : '#fdba74',
+                    fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 12
+                  }}>{h.name}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ASABE droplet scale legend */}
+          <div className="frost-light" style={{ background:'rgba(255,255,255,0.04)', borderRadius: 12, padding: '10px 16px', border:'1px solid rgba(255,255,255,0.09)', boxShadow:'inset 0 1px 0 rgba(255,255,255,0.05)' }}>
+            <p style={{ margin:'0 0 8px', color:'rgba(240,244,236,0.35)', fontSize: 10, fontWeight: 700, letterSpacing: 1.5, textTransform:'uppercase' }}>
+              ASABE Droplet Classification Scale
+            </p>
+            <div style={{ display:'flex', gap: 6, flexWrap:'wrap' }}>
+              {DROPLET_SCALE.map(d => {
+                const active =
+                  (effectiveTier === 'low'     && d.code === 'M') ||
+                  (effectiveTier === 'moderate' && (d.code === 'C' || d.code === 'VC')) ||
+                  (effectiveTier === 'high'     && (d.code === 'VC' || d.code === 'XC' || d.code === 'UC')) ||
+                  (effectiveTier === 'dicamba'  && (d.code === 'XC' || d.code === 'UC')) ||
+                  (effectiveTier === 'ester'    && (d.code === 'C'  || d.code === 'VC' || d.code === 'XC'));
+                return (
+                  <div key={d.code} style={{
+                    background: active ? `${d.color}25` : 'transparent',
+                    border: `1.5px solid ${active ? d.color : 'rgba(64,145,108,0.15)'}`,
+                    borderRadius: 6, padding: '4px 8px', textAlign:'center',
+                    opacity: active ? 1 : 0.4,
+                    transition: 'all 0.2s'
+                  }}>
+                    <div style={{ color: d.color, fontWeight: 800, fontSize: 12 }}>{d.code}</div>
+                    <div style={{ color:'rgba(240,244,236,0.6)', fontSize: 9, marginTop: 1 }}>{d.label}</div>
+                  </div>
+                );
+              })}
+              <div style={{ display:'flex', alignItems:'center', marginLeft: 4 }}>
+                <span style={{ color:'rgba(240,244,236,0.3)', fontSize: 10 }}>← finer · coarser →</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Nozzle cards */}
+          <div style={{ display:'flex', gap: 14, flexWrap:'wrap' }}>
+            {rec.nozzles.map((n, i) => <NozzleCard key={i} nozzle={n} />)}
+          </div>
+
+          {/* Application parameters */}
+          <div className="frost" style={{ background:'rgba(255,255,255,0.05)', borderRadius: 14, padding: 20, border:'1px solid rgba(255,255,255,0.1)', boxShadow:'0 4px 24px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.07)' }}>
+            <p style={{ margin:'0 0 14px', color:'rgba(240,244,236,0.5)', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform:'uppercase' }}>
+              Application Parameters
+            </p>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(140px,1fr))', gap: 12 }}>
+              {[
+                { icon:'🪣', label:'Carrier Volume', value: rec.gpa.ideal + ' GPA', sub: `${rec.gpa.min}–${rec.gpa.max} GPA range` },
+                { icon:'📏', label:'Boom Height',    value: rec.boom,              sub: isDicamba ? 'above weed canopy (label)' : 'above target canopy' },
+                { icon:'🚜', label:'Ground Speed',   value: rec.speed,             sub: 'recommended max' },
+                { icon:'⚙️', label:'Nozzle Pressure', value: rec.pressure,        sub: 'lower = coarser droplet' },
+              ].map(p => (
+                <div key={p.label} className="frost-light" style={{ background:'rgba(255,255,255,0.05)', borderRadius: 10, padding: '12px 14px', border:'1px solid rgba(255,255,255,0.09)' }}>
+                  <div style={{ fontSize: 20, marginBottom: 4 }}>{p.icon}</div>
+                  <div style={{ color:'rgba(240,244,236,0.45)', fontSize: 10, fontWeight: 700, textTransform:'uppercase', letterSpacing: 1 }}>{p.label}</div>
+                  <div style={{ color:'#f0f4ec', fontSize: 18, fontWeight: 800, margin:'2px 0' }}>{p.value}</div>
+                  <div style={{ color:'rgba(240,244,236,0.4)', fontSize: 11 }}>{p.sub}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Label requirements / drift tips */}
+          <div style={{ background: rec.tierBg, border:`1px solid ${rec.tierBorder}`, borderRadius: 14, padding: 20 }}>
+            <p style={{ margin:'0 0 12px', color:'rgba(240,244,236,0.5)', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform:'uppercase' }}>
+              {isVolatile ? 'Label Requirements & Drift Checklist' : 'Drift Mitigation Tips'}
+            </p>
+            <div style={{ display:'flex', flexDirection:'column', gap: 8 }}>
+              {combinedTips.map((tip, i) => (
+                <div key={i} style={{
+                  display:'flex', gap: 10, alignItems:'flex-start',
+                  background: isVolatile ? (isDicamba ? 'rgba(239,68,68,0.06)' : 'rgba(251,146,60,0.06)') : 'transparent',
+                  borderRadius: isVolatile ? 8 : 0,
+                  padding: isVolatile ? '6px 10px' : '0',
+                  border: isVolatile ? `1px solid ${isDicamba ? 'rgba(239,68,68,0.15)' : 'rgba(251,146,60,0.15)'}` : 'none',
+                }}>
+                  <span style={{ color: rec.tierColor, fontWeight: 800, fontSize: 13, marginTop: 1, flexShrink: 0 }}>
+                    {i + 1}.
+                  </span>
+                  <span style={{ color:'rgba(240,244,236,0.85)', fontSize: 13, lineHeight: 1.55 }}>{tip}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Disclaimer */}
+          <p style={{ margin:0, color:'rgba(240,244,236,0.25)', fontSize: 11, lineHeight: 1.5, textAlign:'center' }}>
+            Nozzle models are from the TeeJet Technologies product catalog. Always verify flow rates against your nozzle chart at your operating pressure.
+            {isVolatile && ' Verify the specific approved nozzle list on your product label — approved lists vary by product and are updated periodically.'}
+            {' '}Final nozzle selection must comply with the pesticide product label. Consult your agronomist or CCA for crop-specific guidance.
+          </p>
+        </div>
+      );
+    }
+
+    /* ─── Adjuvant lookup (keyed by herb id) ─────────────────── */
+    const ADJUVANT_DB = {
+      /* Group 9 — Glyphosate */
+      'roundup-powermax3':'AMS 17 lb/100 gal (built-in sticker — reduce or omit extra surfactant)',
+      'durango-dma':'AMS 17 lb/100 gal + NIS 0.25% v/v',
+      'enlist-one':'None required — choline salt with built-in adjuvant system',
+      'roundup-weathermax':'AMS 17 lb/100 gal (built-in sticker)',
+      'rt3':'AMS 17 lb/100 gal + NIS 0.25% v/v',
+      'glyphomax-plus':'AMS 17 lb/100 gal + NIS 0.25% v/v',
+      'accord-xrt-ii':'NIS 0.25% v/v or MSO 0.5% v/v',
+      'credit-41-extra':'AMS 17 lb/100 gal + NIS 0.25% v/v',
+      'buccaneer-plus':'AMS 17 lb/100 gal (contains surfactant — check label rate)',
+      /* Group 4 — Dicamba (Xtend-registered) */
+      'xtendimax':'NO AMS, NO surfactant — approved partners only per label',
+      'engenia':'NO AMS, NO surfactant — approved partners only per label',
+      'fexapan':'NO AMS, NO surfactant — approved partners only per label',
+      'clarity':'NIS 0.25% v/v optional; AMS 17 lb/100 gal improves uptake on dense canopy',
+      'banvel':'NIS 0.25% v/v; avoid high-load surfactants that increase volatility',
+      /* Group 4 — 2,4-D */
+      'enlist-duo':'None required — choline salt with built-in adjuvant system',
+      'weedone-lv4':'No additional adjuvant — ester formulation; extra surfactant increases volatility risk',
+      'soluamine-6':'NIS 0.25% v/v',
+      'enlist-one-24d':'None required — choline salt with built-in adjuvant system',
+      'starane-ultra':'NIS 0.25% v/v',
+      'stinger':'NIS 0.25% v/v',
+      'tordon-22k':'NIS 0.25% v/v',
+      'milestone':'NIS 0.25% v/v',
+      'mcpa-amine':'NIS 0.25% v/v',
+      /* Group 10 — Glufosinate */
+      'liberty-280sl':'None required — formulation contains surfactant',
+      'interline':'None required — formulation contains surfactant',
+      'rely-280':'None required — formulation contains surfactant',
+      'lifeline':'None required — formulation contains surfactant',
+      'cheetah':'None required — formulation contains surfactant',
+      /* Group 5 — PSII */
+      'aatrex-4l':'NIS 0.25% v/v improves POST activity; none needed for PRE',
+      'bicep-ii-magnum':'None required for PRE soil application',
+      'princep':'None required for PRE soil application',
+      'sencor-4f':'NIS 0.25% v/v for POST; none for PRE',
+      'lorox':'NIS 0.25% v/v',
+      'cotoran':'None required for PRE; NIS 0.25% v/v if POST',
+      'diuron-4l':'None required for PRE soil application',
+      'lexone':'NIS 0.25% v/v for POST; none for PRE',
+      'velpar-l':'NIS 0.25% v/v',
+      /* Group 2 — ALS (corn) */
+      'basis':'COC 1% v/v + AMS 17 lb/100 gal',
+      'accent-q':'COC 1% v/v + AMS 17 lb/100 gal',
+      'option':'COC 1% v/v + AMS 17 lb/100 gal (safener built-in)',
+      'steadfast-q':'COC 1% v/v + AMS 17 lb/100 gal',
+      'peak':'COC 1% v/v + AMS 8.5 lb/100 gal',
+      'tervigo':'MSO 0.5–1% v/v + AMS 17 lb/100 gal',
+      /* Group 2 — ALS (soybean/wheat) */
+      'classic':'NIS 0.25% v/v',
+      'harmony-gt':'NIS 0.25% v/v',
+      'pursuit':'NIS 0.25% v/v or COC 1% v/v',
+      'raptor':'NIS 0.25% v/v or COC 1% v/v',
+      'firstrate':'NIS 0.25% v/v',
+      'synchrony-xp':'NIS 0.25% v/v',
+      'amber':'NIS 0.25% v/v',
+      'canopy-xt':'NIS 0.25% v/v',
+      'python':'NIS 0.25% v/v',
+      'spartan-charge':'None required for PRE; NIS 0.25% v/v for POST',
+      'valor-xlt':'None required for PRE soil application',
+      'autumn-super':'NIS 0.25% v/v',
+      'afforia':'NIS 0.25% v/v',
+      'everest-30-wdg':'NIS 0.25% v/v + AMS 8.5 lb/100 gal',
+      'olympus-flex':'NIS 0.25% v/v + AMS 8.5 lb/100 gal',
+      'survive':'NIS 0.25% v/v',
+      'quelex':'NIS 0.25% v/v',
+      /* Group 1 — ACCase */
+      'select-max':'MSO 0.5–1% v/v (preferred) or COC 1% v/v',
+      'poast':'COC 1% v/v',
+      'assure-ii':'COC 1% v/v',
+      'axial-xtra':'NIS 0.25% v/v',
+      'puccini':'NIS 0.25% v/v or COC 1% v/v',
+      'poast-plus':'COC 1% v/v',
+      'arrow-2ec':'MSO 0.5–1% v/v (preferred) or COC 1% v/v',
+      'fusion':'COC 1% v/v',
+      'kyro':'COC 1% v/v',
+      'interlock':'MSO 0.5–1% v/v or COC 1% v/v',
+      'matador':'NIS 0.25% v/v',
+      /* Group 27 — HPPD */
+      'callisto':'NIS 0.25% v/v or COC 1% v/v + AMS 8.5 lb/100 gal',
+      'laudis':'MSO 0.5% v/v + AMS 17 lb/100 gal',
+      'balance-flexx':'None required for PRE soil application',
+      'impact':'MSO 0.5–1% v/v + AMS 17 lb/100 gal',
+      'armezon':'MSO 0.5–1% v/v + AMS 17 lb/100 gal',
+      'capreno':'MSO 0.5–1% v/v + AMS 17 lb/100 gal',
+      'acuron':'MSO 0.5–1% v/v + AMS 17 lb/100 gal (POST use)',
+      'solstice':'MSO 0.5–1% v/v + AMS 17 lb/100 gal',
+      /* Group 14 — PPO */
+      'cobra':'COC 1% v/v',
+      'flexstar':'COC 1% v/v',
+      'flexstar-gt':'COC 1% v/v + AMS 17 lb/100 gal',
+      'reflex':'COC 1% v/v',
+      'ultra-blazer':'COC 1% v/v',
+      'valor-ew':'None required for PRE soil application',
+      'sharpen':'MSO 0.5% v/v + AMS 8.5 lb/100 gal (POST burndown)',
+      'goal-2xl':'NIS 0.25% v/v (POST contact use)',
+      'authority-first':'None required for PRE soil application',
+      'zidua':'None required for PRE soil application',
+      /* Group 15 — VLCFA */
+      'dual-magnum':'None required for PRE soil application',
+      'harness':'None required for PRE soil application',
+      'outlook':'None required for PRE soil application',
+      'warrant':'None required for PRE soil application',
+      'define':'None required for PRE soil application',
+      'boundary-6-5ec':'None required for PRE soil application',
+      'intrro':'None required for PRE soil application',
+      /* Group 3 — Dinitroanilines */
+      'prowl-h2o':'None required for PRE soil application',
+      'treflan':'None required — must be mechanically incorporated',
+      'sonalan':'None required — must be mechanically incorporated',
+      'curbit':'None required — must be mechanically incorporated',
+      'trifluralin-4ec':'None required — must be mechanically incorporated',
+      /* Group 22 — PSI */
+      'gramoxone-sl':'NIS 0.25% v/v (required for paraquat burndown efficacy)',
+      'gramoxone-inteon':'NIS 0.25% v/v (required)',
+      'diquat-herbicide':'NIS 0.25% v/v',
+      /* Group 6 — Benzonitrile */
+      'buctril':'COC 1% v/v',
+      'maestro-5ec':'COC 1% v/v',
+      'bronate':'COC 1% v/v',
+      /* Group 13 — DXP */
+      'command-3me':'None required for PRE soil application',
+      'commence':'None required — must be mechanically incorporated',
+      /* Premixes */
+      'halex-gt':'MSO 0.5–1% v/v + AMS 17 lb/100 gal (POST use)',
+      'prefix':'None required for PRE soil application',
+      'warrant-ultra':'None required for PRE soil application',
+      'sequence':'AMS 17 lb/100 gal + NIS 0.25% v/v (POST component)',
+      'corvus':'None required for PRE; NIS 0.25% v/v for POST',
+      'verdict':'MSO 0.5% v/v + AMS 8.5 lb/100 gal (POST burndown)',
+      'resicore':'MSO 0.5–1% v/v + AMS 17 lb/100 gal (POST use)',
+      'status':'COC 1% v/v + AMS 8.5 lb/100 gal',
+      'xtend-flex-burndown':'NO AMS, NO surfactant — dicamba product: approved partners only',
+      'trivita':'NIS 0.25% v/v',
+      'fierce-xlt':'None required for PRE soil application',
+      'trivita-soybean':'None required for PRE; MSO for POST',
+      'reviton':'MSO 0.5% v/v + AMS 8.5 lb/100 gal',
+      'elevore':'NIS 0.25% v/v',
+      'krenite-s':'None required',
+    };
+
+    /* ─── Tank-mix compatibility rules ───────────────────────── */
+    const COMPATIBILITY_RULES = [
+      {
+        test: (herbs) => {
+          const hasACCase = herbs.some(h => h.group && h.group.split('+').map(g=>g.trim()).includes('1'));
+          const hasBroadleaf = herbs.some(h => h.group && !h.group.split('+').map(g=>g.trim()).includes('1') &&
+            ['2','4','5','6','14','27'].some(g => h.group.split('+').map(x=>x.trim()).includes(g)));
+          return hasACCase && hasBroadleaf;
+        },
+        status: 'caution',
+        message: 'ACCase inhibitors (Group 1 grass killers) can be antagonized by broadleaf herbicides. Apply ACCase product separately, or use MSO adjuvant which partially mitigates antagonism.',
+        getNames: (herbs) => herbs.filter(h => h.group && h.group.split('+').map(g=>g.trim()).includes('1')).map(h=>h.name),
+      },
+      {
+        test: (herbs) => {
+          const clethodimIds = ['select-max','arrow-2ec','poast','poast-plus'];
+          const hasClethodim = herbs.some(h => clethodimIds.includes(h.id));
+          const hasGlyph = herbs.some(h => h.group && h.group.includes('9'));
+          return hasClethodim && hasGlyph;
+        },
+        status: 'caution',
+        message: 'Glyphosate can antagonize clethodim/sethoxydim activity on grasses. Apply the ACCase product 3+ days before or after glyphosate when possible, or use MSO adjuvant to partially compensate.',
+        getNames: (herbs) => herbs.filter(h => ['select-max','arrow-2ec','poast','poast-plus'].includes(h.id) || (h.group&&h.group.includes('9'))).map(h=>h.name),
+      },
+      {
+        test: (herbs) => {
+          const ppoHerbs = herbs.filter(h => h.group && h.group.split('+').map(g=>g.trim()).includes('14'));
+          return ppoHerbs.length >= 2;
+        },
+        status: 'caution',
+        message: 'Two PPO inhibitors (Group 14) in the same tank increases crop injury risk without proportional weed control benefit. Consider using just one PPO product plus a partner from a different mode of action.',
+        getNames: (herbs) => herbs.filter(h => h.group && h.group.split('+').map(g=>g.trim()).includes('14')).map(h=>h.name),
+      },
+      {
+        test: (herbs) => {
+          const hasCobra = herbs.some(h => h.id === 'cobra');
+          const hasFomesafen = herbs.some(h => ['flexstar','reflex','flexstar-gt'].includes(h.id));
+          return hasCobra && hasFomesafen;
+        },
+        status: 'incompatible',
+        message: 'Cobra (lactofen) + fomesafen — both PPO inhibitors applied together significantly increases soybean contact injury. Use one PPO product only.',
+        getNames: (herbs) => herbs.filter(h => ['cobra','flexstar','reflex','flexstar-gt'].includes(h.id)).map(h=>h.name),
+      },
+      {
+        test: (herbs) => {
+          const hasDicamba = herbs.some(h => h.moa && h.moa.toLowerCase().includes('dicamba'));
+          const hasGlyphNotApproved = herbs.some(h => h.group && h.group.includes('9') && !['enlist-duo'].includes(h.id));
+          return hasDicamba && hasGlyphNotApproved;
+        },
+        status: 'note',
+        message: 'Verify your glyphosate product is on the approved partner list for your specific dicamba product (XtendiMax, Engenia, or FeXapan). Not all glyphosate formulations are approved — using an unapproved partner violates the label.',
+        getNames: (herbs) => herbs.filter(h => (h.moa&&h.moa.toLowerCase().includes('dicamba')) || (h.group&&h.group.includes('9'))).map(h=>h.name),
+      },
+      {
+        test: (herbs) => {
+          const hasParaquat = herbs.some(h => ['gramoxone-sl','gramoxone-inteon'].includes(h.id));
+          const hasGlyph = herbs.some(h => h.group && h.group.includes('9'));
+          return hasParaquat && hasGlyph;
+        },
+        status: 'caution',
+        message: 'Paraquat (Gramoxone) + glyphosate: the fast contact action of paraquat can reduce glyphosate translocation to perennial roots. Use sequentially or rely on the contact burndown of paraquat alone for annual weeds.',
+        getNames: (herbs) => herbs.filter(h => ['gramoxone-sl','gramoxone-inteon'].includes(h.id) || (h.group&&h.group.includes('9'))).map(h=>h.name),
+      },
+      {
+        test: (herbs) => {
+          const hasParaquat = herbs.some(h => ['gramoxone-sl','gramoxone-inteon'].includes(h.id));
+          const hasALS = herbs.some(h => h.group && h.group.split('+').map(g=>g.trim()).includes('2'));
+          return hasParaquat && hasALS;
+        },
+        status: 'incompatible',
+        message: 'Paraquat (Gramoxone) + ALS inhibitor: antagonism between these modes significantly reduces burndown efficacy. These products should NOT be tank-mixed.',
+        getNames: (herbs) => herbs.filter(h => ['gramoxone-sl','gramoxone-inteon'].includes(h.id) || (h.group&&h.group.split('+').map(g=>g.trim()).includes('2'))).map(h=>h.name),
+      },
+    ];
+
+    /* ─── Forecast Chart (SVG sparkline) ─────────────────────── */
+    function ForecastChart({ hourly }) {
+      if (!hourly || hourly.length === 0) return null;
+      const W = 860, H = 160, padL = 42, padR = 42, padT = 16, padB = 28;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+      const pts = hourly.slice(0, 24);
+      const maxWind = Math.max(20, ...pts.map(h => h.wind||0));
+      const minTemp = Math.min(...pts.map(h => h.temp||0));
+      const maxTemp = Math.max(...pts.map(h => h.temp||0));
+      const tempRange = Math.max(1, maxTemp - minTemp);
+
+      const xOf = (i) => padL + (i / (pts.length - 1)) * plotW;
+      const yWindOf = (v) => padT + plotH - ((v / maxWind) * plotH);
+      const yTempOf = (v) => padT + plotH - (((v - minTemp) / tempRange) * plotH * 0.7 + plotH * 0.15);
+
+      /* Spray window shading */
+      const bands = [];
+      let start = null;
+      pts.forEach((h, i) => {
+        const ok = h.wind <= 15 && h.rain < 50 && (h.temp||50) >= 40;
+        if (ok && start === null) start = i;
+        if (!ok && start !== null) { bands.push([start, i-1]); start = null; }
+      });
+      if (start !== null) bands.push([start, pts.length-1]);
+
+      /* Wind polyline — color per segment */
+      const windSegs = pts.slice(0,-1).map((h,i) => {
+        const x1=xOf(i), y1=yWindOf(h.wind||0), x2=xOf(i+1), y2=yWindOf(pts[i+1].wind||0);
+        const w = (h.wind||0);
+        const col = w<=7?'#4ade80':w<=10?'#fbbf24':'#f87171';
+        return { x1,y1,x2,y2,col };
+      });
+
+      /* Temp area path */
+      const tempPts = pts.map((h,i) => `${xOf(i)},${yTempOf(h.temp||0)}`).join(' ');
+      const tempArea = `M${xOf(0)},${yTempOf(pts[0].temp||0)} ` +
+        pts.map((h,i) => `L${xOf(i)},${yTempOf(h.temp||0)}`).join(' ') +
+        ` L${xOf(pts.length-1)},${padT+plotH} L${xOf(0)},${padT+plotH} Z`;
+
+      /* Y axis ticks — wind */
+      const windTicks = [0,5,10,15,20].filter(v=>v<=maxWind+2);
+
+      /* X axis — every 4 hours */
+      const xTicks = pts.filter((_,i)=>i%4===0);
+
+      return (
+        <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',height:'auto',display:'block',overflow:'visible'}}>
+          {/* Spray window bands */}
+          {bands.map(([a,b],k) => (
+            <rect key={k}
+              x={xOf(a)} y={padT} width={xOf(b)-xOf(a)} height={plotH}
+              fill="rgba(34,197,94,0.08)" />
+          ))}
+          {/* Wind threshold lines */}
+          {[7,10,15].map(v => v<=maxWind+2 && (
+            <line key={v} x1={padL} x2={padL+plotW} y1={yWindOf(v)} y2={yWindOf(v)}
+              stroke={v<=7?'rgba(74,222,128,0.2)':v<=10?'rgba(251,191,36,0.2)':'rgba(248,113,113,0.2)'}
+              strokeDasharray="3 3" />
+          ))}
+          {/* Temp area */}
+          <path d={tempArea} fill="rgba(96,165,250,0.08)" />
+          {/* Temp line */}
+          <polyline points={tempPts} fill="none" stroke="rgba(147,197,253,0.45)" strokeWidth="1.5" strokeDasharray="4 3" />
+          {/* Wind line segments */}
+          {windSegs.map((s,i) => (
+            <line key={i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={s.col} strokeWidth="2.5" strokeLinecap="round" />
+          ))}
+          {/* Wind dots */}
+          {pts.map((h,i) => {
+            const w=h.wind||0;
+            const col=w<=7?'#4ade80':w<=10?'#fbbf24':'#f87171';
+            return <circle key={i} cx={xOf(i)} cy={yWindOf(w)} r="3" fill={col} />;
+          })}
+          {/* Y axis — wind labels */}
+          {windTicks.map(v => (
+            <text key={v} x={padL-6} y={yWindOf(v)+4} textAnchor="end" fontSize="9" fill="rgba(255,255,255,0.35)">{v}</text>
+          ))}
+          <text x={padL-10} y={padT+plotH/2} textAnchor="middle" fontSize="9" fill="rgba(255,255,255,0.25)" transform={`rotate(-90,${padL-10},${padT+plotH/2})`}>mph</text>
+          {/* Temp labels right axis */}
+          <text x={padL+plotW+6} y={yTempOf(maxTemp)+4} textAnchor="start" fontSize="9" fill="rgba(147,197,253,0.4)">{Math.round(maxTemp)}°</text>
+          <text x={padL+plotW+6} y={yTempOf(minTemp)+4} textAnchor="start" fontSize="9" fill="rgba(147,197,253,0.4)">{Math.round(minTemp)}°</text>
+          {/* X axis ticks */}
+          {xTicks.map((h,i) => {
+            const realIdx = pts.indexOf(h);
+            return (
+              <text key={i} x={xOf(realIdx)} y={padT+plotH+14} textAnchor="middle" fontSize="9" fill="rgba(255,255,255,0.3)">
+                {h.isNow ? 'NOW' : fmtHour(h.time)}
+              </text>
+            );
+          })}
+          {/* Legend */}
+          <circle cx={padL} cy={padT-6} r="4" fill="#4ade80" />
+          <text x={padL+8} y={padT-2} fontSize="9" fill="rgba(255,255,255,0.4)">≤7 mph</text>
+          <circle cx={padL+58} cy={padT-6} r="4" fill="#fbbf24" />
+          <text x={padL+66} y={padT-2} fontSize="9" fill="rgba(255,255,255,0.4)">7–10</text>
+          <circle cx={padL+108} cy={padT-6} r="4" fill="#f87171" />
+          <text x={padL+116} y={padT-2} fontSize="9" fill="rgba(255,255,255,0.4)">&gt;10 mph</text>
+          <rect x={padL+160} y={padT-10} width={18} height={8} fill="rgba(34,197,94,0.2)" />
+          <text x={padL+182} y={padT-2} fontSize="9" fill="rgba(255,255,255,0.4)">Spray window</text>
+          <line x1={padL+272} y1={padT-6} x2={padL+290} y2={padT-6} stroke="rgba(147,197,253,0.45)" strokeWidth="1.5" strokeDasharray="4 3" />
+          <text x={padL+294} y={padT-2} fontSize="9" fill="rgba(255,255,255,0.4)">Temp (°F)</text>
+        </svg>
+      );
+    }
+
+    /* ─── Compatibility Panel ─────────────────────────────────── */
+    function CompatibilityPanel({ herbs }) {
+      if (herbs.length < 2) return null;
+      const triggered = COMPATIBILITY_RULES.filter(r => r.test(herbs));
+      const colors = { incompatible:{ bg:'rgba(239,68,68,0.08)', border:'rgba(239,68,68,0.4)', text:'#f87171', icon:'✗' }, caution:{ bg:'rgba(251,191,36,0.08)', border:'rgba(251,191,36,0.35)', text:'#fbbf24', icon:'⚠' }, note:{ bg:'rgba(96,165,250,0.08)', border:'rgba(96,165,250,0.3)', text:'#93c5fd', icon:'ℹ' } };
+      return (
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          <p style={{margin:'0 0 4px',color:'rgba(255,255,255,0.4)',fontSize:11,fontWeight:700,letterSpacing:2,textTransform:'uppercase'}}>Tank-Mix Compatibility</p>
+          {triggered.length === 0 ? (
+            <div style={{display:'flex',gap:10,alignItems:'center',background:'rgba(34,197,94,0.08)',border:'1px solid rgba(34,197,94,0.3)',borderRadius:10,padding:'10px 14px'}}>
+              <span style={{color:'#4ade80',fontWeight:800,fontSize:16}}>✓</span>
+              <span style={{color:'rgba(240,244,236,0.75)',fontSize:13}}>No compatibility issues detected between selected products.</span>
+            </div>
+          ) : triggered.map((r,i) => {
+            const c = colors[r.status];
+            const names = r.getNames(herbs);
+            return (
+              <div key={i} style={{background:c.bg,border:`1px solid ${c.border}`,borderLeft:`3px solid ${c.text}`,borderRadius:10,padding:'10px 14px',display:'flex',gap:10,alignItems:'flex-start'}}>
+                <span style={{color:c.text,fontWeight:800,fontSize:15,flexShrink:0,marginTop:1}}>{c.icon}</span>
+                <div>
+                  <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:4}}>
+                    {names.map(n=><span key={n} style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',borderRadius:8,padding:'1px 8px',fontSize:11,fontWeight:700,color:'rgba(255,255,255,0.8)'}}>{n}</span>)}
+                  </div>
+                  <span style={{color:'rgba(240,244,236,0.75)',fontSize:12,lineHeight:1.5}}>{r.message}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    /* ─── Adjuvant Panel ──────────────────────────────────────── */
+    function AdjuvantPanel({ herbs }) {
+      if (herbs.length === 0) return null;
+      const noSurf = herbs.filter(h => (ADJUVANT_DB[h.id]||'').toLowerCase().includes('no ams') || (ADJUVANT_DB[h.id]||'').toLowerCase().includes('no surfactant'));
+      const needsSurf = herbs.filter(h => { const a=(ADJUVANT_DB[h.id]||''); return (a.includes('COC')||a.includes('MSO')||a.includes('NIS')) && !noSurf.find(x=>x.id===h.id); });
+      const conflict = noSurf.length > 0 && needsSurf.length > 0;
+      return (
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          <p style={{margin:'0 0 4px',color:'rgba(255,255,255,0.4)',fontSize:11,fontWeight:700,letterSpacing:2,textTransform:'uppercase'}}>Adjuvant Requirements</p>
+          {conflict && (
+            <div style={{background:'rgba(239,68,68,0.08)',border:'1px solid rgba(239,68,68,0.4)',borderRadius:10,padding:'10px 14px',display:'flex',gap:8,alignItems:'flex-start'}}>
+              <span style={{color:'#f87171',fontWeight:800,fontSize:15,flexShrink:0}}>⚠</span>
+              <span style={{color:'rgba(240,244,236,0.8)',fontSize:12,lineHeight:1.5}}>
+                <strong style={{color:'#f87171'}}>Adjuvant conflict:</strong> {noSurf.map(h=>h.name).join(', ')} requires NO surfactant, but {needsSurf.map(h=>h.name).join(', ')} requires one. Apply separately or verify with your agronomist.
+              </span>
+            </div>
+          )}
+          {herbs.map(h => {
+            const adj = ADJUVANT_DB[h.id] || 'See product label for adjuvant recommendations';
+            const isNone = adj.toLowerCase().startsWith('none');
+            const isConflict = adj.toLowerCase().includes('no ams') || adj.toLowerCase().includes('no surfactant');
+            return (
+              <div key={h.id} style={{display:'flex',gap:12,alignItems:'flex-start',background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.09)',borderRadius:10,padding:'10px 14px'}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{color:'rgba(255,255,255,0.85)',fontSize:13,fontWeight:700,marginBottom:2}}>{h.name}</div>
+                  <div style={{color: isConflict?'#f87171':isNone?'rgba(255,255,255,0.4)':'rgba(96,165,250,0.9)', fontSize:12,lineHeight:1.5}}>{adj}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    /* ─── Resistance Management Panel ────────────────────────── */
+    const RESISTANCE_ALERTS = {
+      '9': 'Glyphosate-resistant waterhemp, Palmer amaranth, and horseweed (marestail) are confirmed across the US Midwest and South. Always rotate modes of action.',
+      '2': 'ALS resistance is widespread in many weed species. Do not rely on a single ALS product — rotate with PPO, HPPD, or other modes.',
+      '14': 'PPO-resistant waterhemp is confirmed in multiple Midwestern states. Pair with a residual from a different mode of action.',
+      '5': 'Triazine (atrazine) resistance is common in pigweed and lambsquarters in heavily treated areas.',
+      '1': 'ACCase resistance is documented in Italian ryegrass, wild oat, and blackgrass in some regions.',
+    };
+    function ResistancePanel({ herbs }) {
+      if (herbs.length === 0) return null;
+      const allGroups = herbs.flatMap(h => (h.group||'').split('+').map(g=>g.trim()).filter(Boolean));
+      const uniqueGroups = [...new Set(allGroups)];
+      const n = uniqueGroups.length;
+      const score = n >= 3 ? 'good' : n === 2 ? 'moderate' : 'risk';
+      const cfg = { good:{color:'#4ade80',bg:'rgba(34,197,94,0.08)',border:'rgba(34,197,94,0.3)',label:'GOOD — Multiple Modes'}, moderate:{color:'#fbbf24',bg:'rgba(251,191,36,0.08)',border:'rgba(251,191,36,0.3)',label:'MODERATE — Two Modes'}, risk:{color:'#f87171',bg:'rgba(239,68,68,0.08)',border:'rgba(239,68,68,0.35)',label:'HIGH RISK — Single Mode'} };
+      const c = cfg[score];
+      const alerts = uniqueGroups.flatMap(g => RESISTANCE_ALERTS[g] ? [{ group:g, msg:RESISTANCE_ALERTS[g] }] : []);
+      const allPost = herbs.every(h => h.type && h.type.includes('POST') && !h.type.includes('PRE'));
+      return (
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          <p style={{margin:'0 0 4px',color:'rgba(255,255,255,0.4)',fontSize:11,fontWeight:700,letterSpacing:2,textTransform:'uppercase'}}>Resistance Management</p>
+          <div style={{background:c.bg,border:`1px solid ${c.border}`,borderRadius:10,padding:'12px 14px',display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}}>
+            <span style={{color:c.color,fontWeight:800,fontSize:13}}>{c.label}</span>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+              {uniqueGroups.map(g=><span key={g} style={{background:'rgba(255,255,255,0.08)',border:`1px solid ${c.border}`,color:c.color,fontSize:10,fontWeight:800,padding:'2px 8px',borderRadius:8}}>Group {g}</span>)}
+            </div>
+          </div>
+          {allPost && (
+            <div style={{background:'rgba(251,191,36,0.07)',border:'1px solid rgba(251,191,36,0.3)',borderRadius:10,padding:'10px 14px',display:'flex',gap:8,alignItems:'flex-start'}}>
+              <span style={{color:'#fbbf24',fontWeight:800,flexShrink:0}}>💡</span>
+              <span style={{color:'rgba(240,244,236,0.75)',fontSize:12,lineHeight:1.5}}>All selected products are POST-emergence only. Consider adding a PRE residual herbicide from a different mode of action for extended weed control and resistance management.</span>
+            </div>
+          )}
+          {alerts.map(a=>(
+            <div key={a.group} style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:10,padding:'10px 14px',display:'flex',gap:8,alignItems:'flex-start'}}>
+              <span style={{color:'rgba(255,255,255,0.4)',fontWeight:800,flexShrink:0,fontSize:12}}>G{a.group}</span>
+              <span style={{color:'rgba(240,244,236,0.6)',fontSize:12,lineHeight:1.5}}>{a.msg}</span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    /* ─── Rate Calculator ─────────────────────────────────────── */
+    function RateCalculator({ herbs, fieldAcres, setFieldAcres, targetGPA, setTargetGPA }) {
+      const [localGPA, setLocalGPA] = React.useState(targetGPA||15);
+      const acres = parseFloat(fieldAcres) || 0;
+      const parseRate = (rateStr) => {
+        const m = rateStr.match(/(\d+\.?\d*)\s*[–\-]\s*(\d+\.?\d*)\s*(fl oz|oz|pt|qt|lb)/i);
+        if (!m) return null;
+        return { lo: parseFloat(m[1]), hi: parseFloat(m[2]), unit: m[3].toLowerCase() };
+      };
+      const toGal = (val, unit) => {
+        if (unit==='fl oz') return (val/128).toFixed(2);
+        if (unit==='pt') return (val/8).toFixed(2);
+        if (unit==='qt') return (val/4).toFixed(2);
+        return null;
+      };
+      return (
+        <div style={{display:'flex',flexDirection:'column',gap:12}}>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+            <div style={{display:'flex',flexDirection:'column',gap:4,flex:1,minWidth:140}}>
+              <label style={{color:'rgba(255,255,255,0.45)',fontSize:10,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>Field Size (acres)</label>
+              <input type="number" min="0" value={fieldAcres} onChange={e=>setFieldAcres(e.target.value)} placeholder="e.g. 120"
+                style={{background:'rgba(0,0,0,0.2)',border:'1px solid rgba(255,255,255,0.14)',borderRadius:8,padding:'8px 12px',color:'#fff',fontSize:14,fontFamily:'inherit'}} />
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:4,flex:1,minWidth:140}}>
+              <label style={{color:'rgba(255,255,255,0.45)',fontSize:10,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>Carrier Volume (GPA)</label>
+              <input type="number" min="1" value={localGPA} onChange={e=>{setLocalGPA(e.target.value);setTargetGPA&&setTargetGPA(e.target.value);}}
+                style={{background:'rgba(0,0,0,0.2)',border:'1px solid rgba(255,255,255,0.14)',borderRadius:8,padding:'8px 12px',color:'#fff',fontSize:14,fontFamily:'inherit'}} />
+            </div>
+          </div>
+          {acres > 0 && (
+            <div style={{display:'flex',flexDirection:'column',gap:8}}>
+              {herbs.map(h => {
+                const r = parseRate(h.rate);
+                return (
+                  <div key={h.id} style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.09)',borderRadius:10,padding:'10px 14px'}}>
+                    <div style={{color:'rgba(255,255,255,0.85)',fontSize:13,fontWeight:700,marginBottom:4}}>{h.name}</div>
+                    {r ? (
+                      <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+                        <div><span style={{color:'rgba(255,255,255,0.4)',fontSize:11}}>Low rate: </span><span style={{color:'#60a5fa',fontWeight:700}}>{(r.lo*acres).toFixed(1)} {r.unit}</span>{toGal(r.lo*acres,r.unit)&&<span style={{color:'rgba(255,255,255,0.35)',fontSize:11}}> ({toGal(r.lo*acres,r.unit)} gal)</span>}</div>
+                        <div><span style={{color:'rgba(255,255,255,0.4)',fontSize:11}}>High rate: </span><span style={{color:'#f87171',fontWeight:700}}>{(r.hi*acres).toFixed(1)} {r.unit}</span>{toGal(r.hi*acres,r.unit)&&<span style={{color:'rgba(255,255,255,0.35)',fontSize:11}}> ({toGal(r.hi*acres,r.unit)} gal)</span>}</div>
+                      </div>
+                    ) : <span style={{color:'rgba(255,255,255,0.35)',fontSize:12}}>Rate: {h.rate} — calculate manually</span>}
+                  </div>
+                );
+              })}
+              <div style={{background:'rgba(96,165,250,0.08)',border:'1px solid rgba(96,165,250,0.3)',borderRadius:10,padding:'10px 14px',display:'flex',gap:8,alignItems:'center'}}>
+                <span style={{fontSize:18}}>💧</span>
+                <span style={{color:'rgba(147,197,253,0.9)',fontSize:13,fontWeight:700}}>Total carrier water: {(acres*(parseFloat(localGPA)||15)).toFixed(0)} gallons ({acres} ac × {localGPA} GPA)</span>
+              </div>
+            </div>
+          )}
+          {!acres && <p style={{color:'rgba(255,255,255,0.25)',fontSize:12,margin:0,textAlign:'center'}}>Enter field size above to calculate product quantities.</p>}
+        </div>
+      );
+    }
+
+    /* ─── Nozzle Calibration Calculator ──────────────────────── */
+    function NozzleCalculator({ recommendedGPA, fieldAcres }) {
+      const [tipFlow, setTipFlow]   = React.useState('0.40');
+      const [speed, setSpeed]       = React.useState('10');
+      const [spacing, setSpacing]   = React.useState('15');
+      const [tankSize, setTankSize] = React.useState('');
+      const acres = parseFloat(fieldAcres)||0;
+      const gpa = ((parseFloat(tipFlow)*5940)/(parseFloat(spacing)*parseFloat(speed))).toFixed(2);
+      const recGPA = parseFloat(recommendedGPA)||15;
+      const gpaNum = parseFloat(gpa);
+      const inRange = gpaNum >= recGPA * 0.8 && gpaNum <= recGPA * 1.3;
+      const gpaColor = inRange ? '#4ade80' : '#fbbf24';
+      const tanksPerField = acres && tankSize ? (acres * gpaNum / parseFloat(tankSize)).toFixed(1) : null;
+      return (
+        <div style={{display:'flex',flexDirection:'column',gap:12}}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:10}}>
+            {[
+              {label:'Tip Flow (gpm)', val:tipFlow, set:setTipFlow, opts:['0.20','0.30','0.40','0.50','0.60']},
+              {label:'Speed (mph)', val:speed, set:setSpeed, type:'number'},
+              {label:'Nozzle Spacing (in)', val:spacing, set:setSpacing, type:'number'},
+              {label:'Tank Size (gal)', val:tankSize, set:setTankSize, type:'number', placeholder:'optional'},
+            ].map(f=>(
+              <div key={f.label} style={{display:'flex',flexDirection:'column',gap:4}}>
+                <label style={{color:'rgba(255,255,255,0.45)',fontSize:10,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>{f.label}</label>
+                {f.opts ? (
+                  <select value={f.val} onChange={e=>f.set(e.target.value)} style={{background:'rgba(0,0,0,0.2)',border:'1px solid rgba(255,255,255,0.14)',borderRadius:8,padding:'8px 10px',color:'#fff',fontSize:14,fontFamily:'inherit'}}>
+                    {f.opts.map(o=><option key={o} value={o}>{o} gpm</option>)}
+                  </select>
+                ) : (
+                  <input type={f.type||'text'} value={f.val} onChange={e=>f.set(e.target.value)} placeholder={f.placeholder||''}
+                    style={{background:'rgba(0,0,0,0.2)',border:'1px solid rgba(255,255,255,0.14)',borderRadius:8,padding:'8px 10px',color:'#fff',fontSize:14,fontFamily:'inherit'}} />
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{background:'rgba(255,255,255,0.04)',border:`1px solid rgba(255,255,255,0.1)`,borderRadius:12,padding:'14px 18px',display:'flex',flexWrap:'wrap',gap:16,alignItems:'center'}}>
+            <div style={{textAlign:'center'}}>
+              <div style={{color:'rgba(255,255,255,0.4)',fontSize:10,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>Calculated GPA</div>
+              <div style={{color:gpaColor,fontSize:28,fontWeight:900}}>{isNaN(gpaNum)?'—':gpa}</div>
+              <div style={{color:'rgba(255,255,255,0.3)',fontSize:10}}>{inRange?'✓ Within rec range':'⚠ Outside rec range'}</div>
+            </div>
+            <div style={{flex:1,fontSize:12,color:'rgba(255,255,255,0.5)',lineHeight:1.6,minWidth:180}}>
+              <div>Formula: (tip flow × 5940) ÷ (spacing × speed)</div>
+              <div>= ({tipFlow} × 5940) ÷ ({spacing} × {speed})</div>
+              {tanksPerField && <div style={{color:'rgba(147,197,253,0.8)',marginTop:4}}>💧 {tanksPerField} tank-loads for {acres} ac</div>}
+            </div>
+          </div>
+          <p style={{margin:0,color:'rgba(255,255,255,0.25)',fontSize:11}}>Tip: Increasing pressure from 30→40 PSI increases flow ~15% — recheck GPA after any pressure change. Verify with a catch test before field application.</p>
+        </div>
+      );
+    }
+
+    /* ─── Main App ────────────────────────────────────────────── */
+    function App() {
+      const [query, setQuery]           = useState('');
+      const [weather, setWeather]       = useState(null);
+      const [loading, setLoading]       = useState(false);
+      const [error, setError]           = useState('');
+      const [locName, setLocName]       = useState('');
+      const [selectedHerbs, setSelectedHerbs] = useState([]);
+      const [suggestions, setSuggestions] = useState([]);
+      const [showDrop, setShowDrop]     = useState(false);
+      const [activeIdx, setActiveIdx]   = useState(-1);
+      const [sugLoading, setSugLoading] = useState(false);
+      const [savedLocs, setSavedLocs]   = useState(() => {
+        try { return JSON.parse(localStorage.getItem('sprayAssistant_savedLocs') || '[]'); } catch { return []; }
+      });
+      const [showRateCalc, setShowRateCalc]   = useState(false);
+      const [showNozzleCalc, setShowNozzleCalc] = useState(false);
+      const [fieldAcres, setFieldAcres]       = useState('');
+      const searchWrapRef = useRef(null);
+      const debounceRef   = useRef(null);
+
+      const loadWeather = useCallback(async (lat, lon, name) => {
+        setLoading(true); setError(''); setShowDrop(false); setSuggestions([]);
+        try {
+          const url = [
+            `https://api.open-meteo.com/v1/forecast`,
+            `?latitude=${lat}&longitude=${lon}`,
+            `&current=temperature_2m,wind_speed_10m,wind_direction_10m`,
+            `&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,precipitation_probability,relative_humidity_2m`,
+            `&wind_speed_unit=mph&temperature_unit=fahrenheit&forecast_days=2&timezone=auto`
+          ].join('');
+          const res  = await fetch(url);
+          const data = await res.json();
+          if (data.error) throw new Error(data.reason || 'API error');
+          setWeather(data);
+          setLocName(name);
+        } catch (e) {
+          setError('Weather fetch failed — check your connection and try again.');
+        }
+        setLoading(false);
+      }, []);
+
+      /* Debounced autocomplete — US only, up to 8 results */
+      useEffect(() => {
+        clearTimeout(debounceRef.current);
+        const q = query.trim();
+        if (q.length < 2) { setSuggestions([]); setShowDrop(false); return; }
+        debounceRef.current = setTimeout(async () => {
+          setSugLoading(true);
+          try {
+            const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=20&language=en&format=json`;
+            const res  = await fetch(url);
+            const data = await res.json();
+            const us = (data.results || [])
+              .filter(r => r.country_code === 'US')
+              .slice(0, 8)
+              .map(r => ({
+                id:    r.id,
+                lat:   r.latitude,
+                lon:   r.longitude,
+                city:  r.name,
+                state: r.admin1  || '',
+                county:r.admin2  || '',
+                label: [r.name, r.admin1].filter(Boolean).join(', '),
+                sub:   r.admin2 ? `${r.admin2} County` : '',
+              }));
+            setSuggestions(us);
+            setShowDrop(us.length > 0);
+            setActiveIdx(-1);
+          } catch { /* silent */ }
+          setSugLoading(false);
+        }, 280);
+        return () => clearTimeout(debounceRef.current);
+      }, [query]);
+
+      /* Close dropdown on outside click */
+      useEffect(() => {
+        function handleOutside(e) {
+          if (searchWrapRef.current && !searchWrapRef.current.contains(e.target)) {
+            setShowDrop(false);
+          }
+        }
+        document.addEventListener('mousedown', handleOutside);
+        return () => document.removeEventListener('mousedown', handleOutside);
+      }, []);
+
+      const selectSuggestion = (s) => {
+        setQuery(s.label);
+        loadWeather(s.lat, s.lon, s.label);
+      };
+
+      const handleKeyDown = (e) => {
+        if (!showDrop || suggestions.length === 0) return;
+        if (e.key === 'ArrowDown')  { e.preventDefault(); setActiveIdx(i => Math.min(i + 1, suggestions.length - 1)); }
+        if (e.key === 'ArrowUp')    { e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0)); }
+        if (e.key === 'Enter')      { e.preventDefault(); if (activeIdx >= 0) selectSuggestion(suggestions[activeIdx]); }
+        if (e.key === 'Escape')     { setShowDrop(false); }
+      };
+
+      const handleGeo = () => {
+        if (!navigator.geolocation) { setError('Geolocation not supported by your browser.'); return; }
+        setLoading(true);
+        navigator.geolocation.getCurrentPosition(
+          p => loadWeather(p.coords.latitude, p.coords.longitude, 'Your Farm Location'),
+          () => { setError('Could not access location. Search manually.'); setLoading(false); }
+        );
+      };
+
+      /* Derived data */
+      let status = null, curWind = null, curDir = null, curTemp = null;
+      let curRain = 0, hourly = [], windows = [], curRain2h = 0;
+      let curRH = null, inversionRisk = false, inversionHigh = false;
+
+      if (weather) {
+        const c   = weather.current;
+        const now = new Date();
+        const times = weather.hourly.time;
+        let idx = times.findIndex(t => new Date(t) >= now);
+        if (idx < 0) idx = 0;
+
+        const precip = weather.hourly.precipitation_probability;
+        const rh = weather.hourly.relative_humidity_2m;
+        curWind = c.wind_speed_10m;
+        curDir  = c.wind_direction_10m;
+        curTemp = c.temperature_2m;
+        curRain = precip[idx] ?? 0;
+        curRH   = rh ? (rh[idx] ?? null) : null;
+
+        curRain2h = Math.max(...precip.slice(idx, idx + 2).map(v => v ?? 0));
+        const rain4h = Math.max(...precip.slice(idx, idx + 4).map(v => v ?? 0));
+        status = sprayStatus(curWind, curRain2h, rain4h);
+
+        /* Inversion risk: calm wind is the primary signal */
+        inversionRisk = curWind < 3;
+        inversionHigh = inversionRisk && curRH !== null && curRH > 90;
+
+        hourly = times.slice(idx, idx + 24).map((t, i) => ({
+          time:  t,
+          wind:  weather.hourly.wind_speed_10m[idx + i],
+          dir:   weather.hourly.wind_direction_10m[idx + i],
+          rain:  precip[idx + i] ?? 0,
+          temp:  weather.hourly.temperature_2m[idx + i],
+          isNow: i === 0,
+        }));
+
+        windows = hourly.filter(h => sprayStatus(h.wind, h.rain, h.rain) === 'green');
+      }
+
+      const saveLocation = () => {
+        if (!weather || !locName) return;
+        const loc = { name: locName, lat: weather.latitude, lon: weather.longitude };
+        setSavedLocs(prev => {
+          const filtered = prev.filter(l => l.name !== loc.name).slice(0, 4);
+          const next = [loc, ...filtered];
+          localStorage.setItem('sprayAssistant_savedLocs', JSON.stringify(next));
+          return next;
+        });
+      };
+      const removeSavedLoc = (name) => {
+        setSavedLocs(prev => {
+          const next = prev.filter(l => l.name !== name);
+          localStorage.setItem('sprayAssistant_savedLocs', JSON.stringify(next));
+          return next;
+        });
+      };
+
+      const printRecord = () => {
+        const herbRows = selectedHerbs.map(h =>
+          `<tr><td>${h.name}</td><td>${h.rate}</td><td>${h.rei}</td><td>${h.phi}</td><td>${ADJUVANT_DB[h.id]||'See label'}</td></tr>`
+        ).join('');
+        const nozzleName = selectedHerbs.some(h => h.moa&&h.moa.toLowerCase().includes('dicamba')) ? 'TeeJet TTI11004VP (XC–UC — Dicamba Label)' : curWind < 7 ? 'TeeJet XR11004VP (Medium)' : curWind < 10 ? 'TeeJet AIXR11004VP (Coarse–VC)' : 'TeeJet TTI11004VP (VC–UC)';
+        const html = `<div class="print-record">
+          <h1>🌿 Spray Application Record</h1>
+          <div class="pr-row"><span class="pr-label">Date / Time:</span><span>${new Date().toLocaleString()}</span></div>
+          <div class="pr-row"><span class="pr-label">Location:</span><span>${locName||'—'}</span></div>
+          <div class="pr-row"><span class="pr-label">GPS:</span><span>${weather?`${weather.latitude.toFixed(4)}, ${weather.longitude.toFixed(4)}`:'—'}</span></div>
+          <div class="pr-section">Conditions at Application</div>
+          <div class="pr-row"><span class="pr-label">Wind Speed:</span><span>${curWind!=null?Math.round(curWind)+' mph':'—'}</span></div>
+          <div class="pr-row"><span class="pr-label">Wind Direction:</span><span>${curDir!=null?degToCompass(curDir)+' ('+Math.round(curDir)+'°)':'—'}</span></div>
+          <div class="pr-row"><span class="pr-label">Temperature:</span><span>${curTemp!=null?Math.round(curTemp)+'°F':'—'}</span></div>
+          <div class="pr-row"><span class="pr-label">Rain Probability:</span><span>${curRain}%</span></div>
+          <div class="pr-row"><span class="pr-label">Spray Decision:</span><span style="font-weight:700">${status?status.toUpperCase():'—'}</span></div>
+          <div class="pr-section">Equipment</div>
+          <div class="pr-row"><span class="pr-label">Nozzle Used:</span><span>${nozzleName}</span></div>
+          <div class="pr-row"><span class="pr-label">Carrier Volume:</span><span>_______  GPA</span></div>
+          <div class="pr-row"><span class="pr-label">Boom Height:</span><span>_______  inches</span></div>
+          <div class="pr-row"><span class="pr-label">Ground Speed:</span><span>_______  mph</span></div>
+          ${selectedHerbs.length>0?`<div class="pr-section">Products Applied</div><table class="pr-table"><thead><tr><th>Product</th><th>Rate</th><th>REI</th><th>PHI</th><th>Adjuvant</th></tr></thead><tbody>${herbRows}</tbody></table>`:''}
+          <div class="pr-section">Certification</div>
+          <div style="display:flex;gap:48px;margin-top:16px">
+            <div><span class="sig-line">Applicator Signature</span></div>
+            <div><span class="sig-line">License / CCA Number</span></div>
+            <div><span class="sig-line">Farm / Field Name</span></div>
+          </div>
+          <p style="margin-top:24px;font-size:11px;color:#666">Always read and follow the pesticide label — it is the law. Retain this record for a minimum of 2 years.</p>
+        </div>`;
+        const w = window.open('','_blank','width=800,height=900');
+        w.document.write(`<!DOCTYPE html><html><head><title>Spray Record</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#000}.print-record h1{font-size:20px;border-bottom:2px solid #000;padding-bottom:8px}.pr-row{display:flex;gap:16px;margin:6px 0;font-size:13px}.pr-label{font-weight:700;min-width:160px}.pr-section{margin:18px 0 8px;font-size:15px;font-weight:700;border-bottom:1px solid #ccc;padding-bottom:4px}.pr-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}.pr-table th{background:#f0f0f0;border:1px solid #ccc;padding:6px 8px;text-align:left}.pr-table td{border:1px solid #ccc;padding:5px 8px}.sig-line{display:inline-block;border-top:1px solid #000;width:200px;padding-top:4px;font-size:11px}</style></head><body>${html}<\/script></body></html>`);
+        w.document.close();
+      };
+
+      const sc = status ? STATUS_CFG[status] : null;
+
+      return (
+        <div style={{ minHeight: '100vh', color: '#fff', fontFamily: 'Inter, system-ui, sans-serif', position:'relative' }}>
+
+          {/* ── Background orbs (neutral — show through frost as pure light) ── */}
+          <div style={{ position:'fixed', inset:0, overflow:'hidden', zIndex:0, pointerEvents:'none' }}>
+            <div style={{ position:'absolute', top:'-18%', right:'-12%', width:700, height:700, borderRadius:'50%', background:'radial-gradient(circle, rgba(255,255,255,0.04) 0%, transparent 65%)' }} />
+            <div style={{ position:'absolute', bottom:'-22%', left:'-12%', width:800, height:800, borderRadius:'50%', background:'radial-gradient(circle, rgba(255,255,255,0.03) 0%, transparent 65%)' }} />
+            <div style={{ position:'absolute', top:'35%', left:'18%',  width:600, height:600, borderRadius:'50%', background:'radial-gradient(circle, rgba(255,255,255,0.02) 0%, transparent 65%)' }} />
+            <div style={{ position:'absolute', top:'8%',  left:'6%',   width:380, height:380, borderRadius:'50%', background:'radial-gradient(circle, rgba(255,255,255,0.025) 0%, transparent 65%)' }} />
+            <div style={{ position:'absolute', bottom:'10%', right:'8%', width:420, height:420, borderRadius:'50%', background:'radial-gradient(circle, rgba(255,255,255,0.02) 0%, transparent 65%)' }} />
+          </div>
+
+          {/* ── All content sits above orbs ── */}
+          <div style={{ position:'relative', zIndex:1 }}>
+
+          {/* ── Header ── */}
+          <header style={{ maxWidth: 900, margin: '0 auto', padding: '32px 24px 0' }}>
+            <div style={{ display:'flex', alignItems:'center', gap: 14, marginBottom: 4 }}>
+              <span style={{ fontSize: 40 }}>🌿</span>
+              <div>
+                <h1 style={{ margin:0, fontSize: 24, fontWeight: 900, color: '#f0f4ec', letterSpacing: -0.5 }}>
+                  Smart Spraying Assistant
+                </h1>
+                <p style={{ margin:0, fontSize: 13, color: 'rgba(255,255,255,0.5)', fontWeight: 500 }}>
+                  Precision ag — pesticide application decision support
+                </p>
+              </div>
+            </div>
+          </header>
+
+          {/* ── Search Bar ── */}
+          <div style={{ maxWidth: 900, margin: '20px auto 0', padding: '0 24px' }}>
+            <div className="frost" style={{ background:'rgba(255,255,255,0.06)', borderRadius: 18, padding: 20, border: '1px solid rgba(255,255,255,0.13)', boxShadow:'0 4px 32px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.08)' }}>
+              <p style={{ margin:'0 0 12px', fontSize: 13, color: 'rgba(240,244,236,0.65)', fontWeight: 500 }}>
+                Enter your farm location to check spray conditions
+              </p>
+              {/* Saved locations chips */}
+              {savedLocs.length > 0 && (
+                <div style={{ display:'flex', gap: 8, flexWrap:'wrap', marginBottom: 12 }}>
+                  <span style={{ color:'rgba(255,255,255,0.3)', fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform:'uppercase', alignSelf:'center' }}>Saved:</span>
+                  {savedLocs.map(loc => (
+                    <div key={loc.name} style={{ display:'flex', alignItems:'center', gap: 4, background:'rgba(255,255,255,0.07)', border:'1px solid rgba(255,255,255,0.15)', borderRadius: 20, padding: '4px 10px 4px 12px' }}>
+                      <button onClick={() => { setQuery(loc.name); loadWeather(loc.lat, loc.lon, loc.name); }} style={{ background:'none', border:'none', color:'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: 600, cursor:'pointer', padding: 0, fontFamily:'inherit' }}>
+                        📍 {loc.name}
+                      </button>
+                      <button onClick={() => removeSavedLoc(loc.name)} style={{ background:'none', border:'none', color:'rgba(255,255,255,0.35)', fontSize: 13, cursor:'pointer', padding: '0 0 0 4px', lineHeight: 1 }}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ display:'flex', gap: 10, flexWrap:'wrap', alignItems:'flex-start' }}>
+
+                {/* Input + dropdown wrapper */}
+                <div ref={searchWrapRef} style={{ flex: 1, minWidth: 220, position: 'relative' }}>
+                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      value={query}
+                      onChange={e => { setQuery(e.target.value); setShowDrop(true); }}
+                      onFocus={e  => { e.target.style.borderColor = 'rgba(82,183,136,0.75)'; e.target.style.boxShadow = '0 0 0 3px rgba(82,183,136,0.12)'; if (suggestions.length > 0) setShowDrop(true); }}
+                      onBlur={e   => { e.target.style.borderColor = 'rgba(255,255,255,0.14)'; e.target.style.boxShadow = 'none'; }}
+                      onKeyDown={handleKeyDown}
+                      placeholder="City or town name (US)..."
+                      autoComplete="off"
+                      style={{
+                        width: '100%', background: 'rgba(0,0,0,0.2)',
+                        backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
+                        border: '1px solid rgba(255,255,255,0.14)', borderRadius: 12,
+                        padding: '10px 40px 10px 16px', color: '#fff', fontSize: 14,
+                        outline: 'none', fontFamily: 'inherit', transition: 'border-color 0.15s, box-shadow 0.15s'
+                      }}
+                    />
+                    {/* Spinner inside input */}
+                    {sugLoading && (
+                      <div style={{
+                        position:'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+                        width: 16, height: 16, border: '2px solid rgba(82,183,136,0.25)',
+                        borderTopColor: 'rgba(255,255,255,0.7)', borderRadius: '50%',
+                        animation: 'spin 0.7s linear infinite', pointerEvents:'none'
+                      }} />
+                    )}
+                  </div>
+
+                  {/* Dropdown */}
+                  {showDrop && suggestions.length > 0 && (
+                    <div style={{
+                      position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0,
+                      background: 'rgba(6,14,10,0.88)', backdropFilter: 'blur(28px) saturate(1.6)', WebkitBackdropFilter: 'blur(28px) saturate(1.6)',
+                      border: '1px solid rgba(255,255,255,0.14)',
+                      borderRadius: 12, overflow: 'hidden',
+                      boxShadow: '0 8px 40px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.07)',
+                      zIndex: 100
+                    }}>
+                      {suggestions.map((s, i) => (
+                        <div
+                          key={s.id}
+                          onMouseDown={() => selectSuggestion(s)}
+                          onMouseEnter={() => setActiveIdx(i)}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            padding: '10px 16px', cursor: 'pointer',
+                            background: i === activeIdx ? 'rgba(82,183,136,0.15)' : 'transparent',
+                            borderBottom: i < suggestions.length - 1 ? '1px solid rgba(64,145,108,0.12)' : 'none',
+                            transition: 'background 0.1s'
+                          }}
+                        >
+                          <span style={{ fontSize: 15, flexShrink: 0 }}>📍</span>
+                          <div style={{ display:'flex', flexDirection:'column', gap: 1, minWidth: 0 }}>
+                            <span style={{ color: '#f0f4ec', fontSize: 14, fontWeight: 600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {s.city}
+                              {s.state && <span style={{ color: 'rgba(255,255,255,0.55)', fontWeight: 500 }}>, {s.state}</span>}
+                            </span>
+                            {s.sub && (
+                              <span style={{ color: 'rgba(240,244,236,0.4)', fontSize: 11 }}>{s.sub}</span>
+                            )}
+                          </div>
+                          <span style={{ marginLeft:'auto', color:'rgba(240,244,236,0.25)', fontSize: 11, flexShrink:0 }}>USA</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* No US results notice */}
+                  {showDrop && !sugLoading && query.trim().length >= 2 && suggestions.length === 0 && (
+                    <div style={{
+                      position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0,
+                      background: 'rgba(6,14,10,0.88)', backdropFilter: 'blur(28px)', WebkitBackdropFilter: 'blur(28px)',
+                      border: '1px solid rgba(255,255,255,0.12)',
+                      borderRadius: 12, padding: '12px 16px', zIndex: 100,
+                      boxShadow: '0 8px 32px rgba(0,0,0,0.5)'
+                    }}>
+                      <span style={{ color:'rgba(240,244,236,0.45)', fontSize: 13 }}>
+                        No US locations found for "<strong style={{color:'rgba(240,244,236,0.7)'}}>{query}</strong>"
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  onClick={handleGeo} disabled={loading}
+                  style={{
+                    background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)',
+                    border: '1px solid rgba(255,255,255,0.15)',
+                    borderRadius: 12, padding: '10px 16px', color: 'rgba(240,244,236,0.85)',
+                    fontSize: 13, cursor: loading ? 'not-allowed' : 'pointer',
+                    opacity: loading ? 0.5 : 1, fontFamily: 'inherit',
+                    transition: 'border-color 0.15s, background 0.15s', whiteSpace:'nowrap',
+                    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)'
+                  }}
+                  onMouseEnter={e => { e.target.style.borderColor = 'rgba(82,183,136,0.5)'; e.target.style.background = 'rgba(255,255,255,0.09)'; }}
+                  onMouseLeave={e => { e.target.style.borderColor = 'rgba(255,255,255,0.15)'; e.target.style.background = 'rgba(255,255,255,0.06)'; }}
+                >
+                  📍 Use My Location
+                </button>
+                {weather && (
+                  <button onClick={saveLocation}
+                    style={{ background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.15)', borderRadius:12, padding:'10px 14px', color:'rgba(240,244,236,0.75)', fontSize:13, cursor:'pointer', fontFamily:'inherit', whiteSpace:'nowrap' }}
+                    title="Save this location for quick access">
+                    ☆ Save
+                  </button>
+                )}
+              </div>
+              {error && <p style={{ margin:'10px 0 0', color: '#f87171', fontSize: 13 }}>{error}</p>}
+            </div>
+          </div>
+
+          {/* ── Loading spinner ── */}
+          {loading && !weather && (
+            <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding: '80px 0', gap: 16 }}>
+              <div style={{
+                width: 44, height: 44, border: '4px solid rgba(82,183,136,0.2)',
+                borderTopColor: 'rgba(255,255,255,0.7)', borderRadius: '50%',
+                animation: 'spin 0.8s linear infinite'
+              }} />
+              <p style={{ color: 'rgba(240,244,236,0.5)', fontSize: 14 }}>Fetching weather data…</p>
+              <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+            </div>
+          )}
+
+          {/* ── Empty state ── */}
+          {!weather && !loading && (
+            <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding: '64px 24px', textAlign:'center' }}>
+              <span style={{ fontSize: 64, marginBottom: 16 }}>🌾</span>
+              <h2 style={{ margin:'0 0 8px', fontSize: 20, fontWeight: 800, color: '#f0f4ec' }}>
+                Enter a location to get started
+              </h2>
+              <p style={{ margin: 0, color: 'rgba(240,244,236,0.45)', fontSize: 14, maxWidth: 360, lineHeight: 1.6 }}>
+                Search your farm location to see current spray conditions, a live Go/No-Go verdict, and the best 24-hour spray windows.
+              </p>
+              <div style={{ display:'flex', gap: 24, marginTop: 32, flexWrap:'wrap', justifyContent:'center' }}>
+                {[
+                  ['🌱', '3–10 mph', 'Ideal spray conditions'],
+                  ['💨', '10–15 mph', 'Caution — drift risk'],
+                  ['⛔', '>15 mph / rain', 'Do not spray'],
+                ].map(([icon, wind, desc]) => (
+                  <div key={wind} className="frost-light" style={{ background:'rgba(255,255,255,0.05)', borderRadius: 14, padding: '16px 20px', border:'1px solid rgba(255,255,255,0.1)', minWidth: 140, textAlign:'center' }}>
+                    <div style={{ fontSize: 28, marginBottom: 6 }}>{icon}</div>
+                    <div style={{ fontWeight: 700, color: 'rgba(255,255,255,0.6)', fontSize: 13 }}>{wind}</div>
+                    <div style={{ color: 'rgba(240,244,236,0.55)', fontSize: 12, marginTop: 2 }}>{desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── Main Dashboard ── */}
+          {weather && (
+            <div style={{ maxWidth: 900, margin: '24px auto 0', padding: '0 24px 64px', display:'flex', flexDirection:'column', gap: 24 }}>
+
+              {/* Status panel */}
+              <div className="frost" style={{ background:'rgba(255,255,255,0.06)', borderRadius: 20, padding: 28, border:`1px solid rgba(255,255,255,0.13)`, boxShadow:`0 0 40px ${sc.ring}18, 0 4px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.09)` }}>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexWrap:'wrap', gap: 20 }}>
+                  <div>
+                    <p style={{ margin:'0 0 4px', color:'rgba(240,244,236,0.5)', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform:'uppercase' }}>
+                      Location
+                    </p>
+                    <h2 style={{ margin:'0 0 4px', fontSize: 22, fontWeight: 800, color:'#f0f4ec' }}>
+                      {locName}
+                    </h2>
+                    <p style={{ margin:0, color:'rgba(240,244,236,0.4)', fontSize: 12 }}>{fmtDateTime()}</p>
+                  </div>
+                  <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap: 10 }}>
+                    <StatusOrb status={status} />
+                    <button onClick={printRecord} style={{ background:'rgba(255,255,255,0.07)', border:'1px solid rgba(255,255,255,0.15)', borderRadius:10, padding:'6px 14px', color:'rgba(255,255,255,0.7)', fontSize:12, cursor:'pointer', fontFamily:'inherit' }}>
+                      🖨 Print Record
+                    </button>
+                  </div>
+                </div>
+
+                {/* Rules legend */}
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap: 10, marginTop: 20 }}>
+                  {[
+                    { color:'#4ade80', bg:'rgba(34,197,94,0.08)', border:'rgba(34,197,94,0.28)', label:'● GO', rule:'3–10 mph wind · No rain 4 hrs' },
+                    { color:'#fbbf24', bg:'rgba(251,191,36,0.08)', border:'rgba(251,191,36,0.28)', label:'● CAUTION', rule:'10–15 mph · Drift risk' },
+                    { color:'#f87171', bg:'rgba(239,68,68,0.08)', border:'rgba(248,113,113,0.28)', label:'● NO-GO', rule:'>15 mph or rain in 2 hrs' },
+                  ].map(r => (
+                    <div key={r.label} className="frost-light" style={{ background: r.bg, border:`1px solid ${r.border}`, borderRadius: 10, padding: '10px 12px', textAlign:'center' }}>
+                      <div style={{ color: r.color, fontWeight: 700, fontSize: 12, marginBottom: 3 }}>{r.label}</div>
+                      <div style={{ color:'rgba(240,244,236,0.65)', fontSize: 11, lineHeight: 1.4 }}>{r.rule}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Current conditions */}
+              <div>
+                <p style={{ margin:'0 0 12px', color:'rgba(240,244,236,0.5)', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform:'uppercase' }}>
+                  Current Conditions
+                </p>
+                <div className="metric-grid" style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(130px,1fr))', gap: 12 }}>
+                  <MetricCard icon="💨" label="Wind Speed"  value={Math.round(curWind)}    unit="mph" />
+                  <MetricCard icon="🧭" label="Direction"   value={degToCompass(curDir)}    unit={`${Math.round(curDir)}°`} />
+                  <MetricCard icon="🌡️" label="Temperature" value={Math.round(curTemp)}     unit="°F" />
+                  <MetricCard icon="🌧️" label="Rain Chance" value={curRain}                 unit="%" />
+                  {curRH !== null && <MetricCard icon="💧" label="Humidity" value={curRH} unit="%" />}
+                </div>
+              </div>
+
+              {/* ── Temperature Inversion Risk Banner ── */}
+              {inversionRisk && (
+                <div style={{ background: inversionHigh ? 'rgba(239,68,68,0.1)' : 'rgba(251,191,36,0.09)', border: `1px solid ${inversionHigh ? 'rgba(239,68,68,0.45)' : 'rgba(251,191,36,0.4)'}`, borderRadius: 14, padding: '14px 18px', display:'flex', gap: 14, alignItems:'flex-start' }}>
+                  <span style={{ fontSize: 22, flexShrink: 0 }}>{inversionHigh ? '🚫' : '⚠️'}</span>
+                  <div>
+                    <p style={{ margin:'0 0 4px', color: inversionHigh ? '#f87171' : '#fbbf24', fontSize: 14, fontWeight: 800 }}>
+                      {inversionHigh ? 'HIGH INVERSION RISK — Do Not Apply' : 'Temperature Inversion Risk — Spray with Caution'}
+                    </p>
+                    <p style={{ margin:0, color:'rgba(240,244,236,0.65)', fontSize: 12, lineHeight: 1.6 }}>
+                      Wind is below 3 mph{inversionHigh ? ' and humidity is above 90%' : ''}. Calm conditions can trap pesticide vapor in a shallow layer near the ground, allowing it to travel long distances off-target before dispersing. {inversionHigh ? 'Do not apply pesticides until wind reaches 3–5 mph with a consistent direction.' : 'Apply only if wind increases above 3 mph. Watch for smoke or fog drifting horizontally without rising — a key inversion indicator.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Herbicide Selector ── */}
+              <div className="frost" style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.11)', borderRadius:20, padding:24, boxShadow:'0 4px 32px rgba(0,0,0,0.22), inset 0 1px 0 rgba(255,255,255,0.07)' }}>
+                <HerbicideSelector
+                  selected={selectedHerbs}
+                  onAdd={h => setSelectedHerbs(prev => prev.find(p => p.id===h.id) ? prev : [...prev, h])}
+                  onRemove={id => setSelectedHerbs(prev => prev.filter(h => h.id !== id))}
+                  weather={weather}
+                  curTemp={curTemp}
+                  curWind={curWind}
+                  rain2h={curRain2h}
+                />
+              </div>
+
+              {/* ── Tank-mix panels (compatibility, adjuvant, resistance, rate calc) ── */}
+              {selectedHerbs.length > 0 && (
+                <div className="frost" style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.11)', borderRadius:20, padding:24, boxShadow:'0 4px 32px rgba(0,0,0,0.22), inset 0 1px 0 rgba(255,255,255,0.07)', display:'flex', flexDirection:'column', gap: 24 }}>
+                  <CompatibilityPanel herbs={selectedHerbs} />
+                  <AdjuvantPanel herbs={selectedHerbs} />
+                  <ResistancePanel herbs={selectedHerbs} />
+                  <details>
+                    <summary style={{ color:'rgba(255,255,255,0.55)', fontSize:12, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', cursor:'pointer', userSelect:'none', padding:'6px 0', listStyle:'none' }}>
+                      🧮 Rate Calculator {showRateCalc ? '▲' : '▼'}
+                    </summary>
+                    <div style={{ marginTop: 12 }}>
+                      <RateCalculator herbs={selectedHerbs} fieldAcres={fieldAcres} setFieldAcres={setFieldAcres} targetGPA={15} />
+                    </div>
+                  </details>
+                </div>
+              )}
+
+              {/* Spray guidance */}
+              <div className="frost" style={{
+                background: `rgba(${status==='green'?'34,197,94':status==='yellow'?'251,191,36':'239,68,68'},0.07)`,
+                border: `1px solid ${sc.ring}40`,
+                borderRadius: 18, padding: 24,
+                boxShadow: `0 0 32px ${sc.ring}14, 0 4px 24px rgba(0,0,0,0.22), inset 0 1px 0 rgba(255,255,255,0.07)`
+              }}>
+                <p style={{ margin:'0 0 10px', color:'rgba(240,244,236,0.5)', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform:'uppercase' }}>
+                  Spray Guidance
+                </p>
+                <p style={{ margin:'0 0 12px', color: sc.dot, fontWeight: 700, fontSize: 17, lineHeight: 1.4 }}>
+                  {ADVICE[status].headline}
+                </p>
+                <ul style={{ margin: 0, paddingLeft: 20, display:'flex', flexDirection:'column', gap: 6 }}>
+                  {ADVICE[status].points.map((pt, i) => (
+                    <li key={i} style={{ color:'rgba(240,244,236,0.8)', fontSize: 14, lineHeight: 1.5 }}>{pt}</li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* Nozzle & application recommendations (GO + CAUTION only) */}
+              {(status === 'green' || status === 'yellow') && (
+                <SprayRecommendations windSpeed={curWind} status={status} selectedHerbs={selectedHerbs} />
+              )}
+
+              {/* Nozzle calibration calculator */}
+              {(status === 'green' || status === 'yellow') && (
+                <div className="frost" style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.11)', borderRadius:20, padding:24, boxShadow:'0 4px 32px rgba(0,0,0,0.22), inset 0 1px 0 rgba(255,255,255,0.07)' }}>
+                  <details>
+                    <summary style={{ color:'rgba(255,255,255,0.55)', fontSize:12, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', cursor:'pointer', userSelect:'none', listStyle:'none', display:'flex', alignItems:'center', gap:8 }}>
+                      <span>⚙️ Nozzle Calibration Calculator</span>
+                      <span style={{ color:'rgba(255,255,255,0.25)', fontSize:10 }}>click to expand</span>
+                    </summary>
+                    <div style={{ marginTop: 16 }}>
+                      <NozzleCalculator recommendedGPA={15} fieldAcres={fieldAcres} />
+                    </div>
+                  </details>
+                </div>
+              )}
+
+              {/* Best spray windows */}
+              <div>
+                <p style={{ margin:'0 0 12px', color:'rgba(240,244,236,0.5)', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform:'uppercase' }}>
+                  Best Spray Windows — Next 24 Hours
+                </p>
+                {windows.length > 0 ? (
+                  <div className="frost" style={{ background:'rgba(34,197,94,0.07)', border:'1px solid rgba(34,197,94,0.25)', borderRadius: 16, padding: 20, boxShadow:'0 4px 24px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.06)' }}>
+                    <div style={{ display:'flex', flexWrap:'wrap', gap: 10 }}>
+                      {windows.map((w, i) => (
+                        <div key={i} className="frost-light" style={{
+                          background:'rgba(34,197,94,0.09)', border:'1.5px solid rgba(34,197,94,0.35)',
+                          borderRadius: 12, padding: '10px 14px', minWidth: 90, textAlign:'center'
+                        }}>
+                          <p style={{ margin:'0 0 2px', color:'#4ade80', fontSize: 12, fontWeight: 700 }}>
+                            {w.isNow ? 'NOW' : fmtHour(w.time)}
+                          </p>
+                          <p style={{ margin:'0 0 2px', color:'#fff', fontSize: 15, fontWeight: 800 }}>
+                            {Math.round(w.wind)} mph
+                          </p>
+                          <p style={{ margin:'0 0 2px', color:'rgba(255,255,255,0.65)', fontSize: 11 }}>
+                            {degToCompass(w.dir)}
+                          </p>
+                          <p style={{ margin:0, color:'rgba(255,255,255,0.55)', fontSize: 11 }}>
+                            🌧 {w.rain}%
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="frost" style={{ background:'rgba(239,68,68,0.07)', border:'1px solid rgba(248,113,113,0.25)', borderRadius: 16, padding: 20, boxShadow:'0 4px 24px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.05)' }}>
+                    <p style={{ margin:'0 0 4px', color:'#f87171', fontWeight: 700, fontSize: 15 }}>
+                      No ideal spray windows in the next 24 hours.
+                    </p>
+                    <p style={{ margin: 0, color:'rgba(240,244,236,0.5)', fontSize: 13 }}>
+                      Monitor the hourly forecast below and check back later.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* 24-hour forecast chart + scroll cards */}
+              <div>
+                <p style={{ margin:'0 0 12px', color:'rgba(240,244,236,0.5)', fontSize: 11, fontWeight: 700, letterSpacing: 2, textTransform:'uppercase' }}>
+                  24-Hour Spray Forecast
+                </p>
+                {/* SVG sparkline chart */}
+                <div className="frost" style={{ padding: '14px 16px 8px', borderRadius: 16, background:'rgba(255,255,255,0.04)', border:'1px solid rgba(255,255,255,0.09)', marginBottom: 10 }}>
+                  <ForecastChart hourly={hourly} />
+                </div>
+                {/* Hourly card scroll */}
+                <div className="frost" style={{ overflowX: 'auto', paddingBottom: 8, padding: 14, borderRadius: 16, background:'rgba(255,255,255,0.04)', border:'1px solid rgba(255,255,255,0.09)' }}>
+                  <div style={{ display:'flex', gap: 8, minWidth: 'max-content' }}>
+                    {hourly.map((h, i) => (
+                      <HourCell key={i} time={h.time} wind={h.wind} dir={h.dir} rain={h.rain} isNow={h.isNow} />
+                    ))}
+                  </div>
+                </div>
+                <p style={{ textAlign:'center', color:'rgba(240,244,236,0.25)', fontSize: 11, marginTop: 8 }}>
+                  Scroll to see all 24 hours &rarr; &nbsp;|&nbsp; Wind in mph &nbsp;|&nbsp; 🌧 = rain probability &nbsp;|&nbsp; Shaded = spray window
+                </p>
+              </div>
+
+              {/* Footer */}
+              <p style={{ textAlign:'center', color:'rgba(240,244,236,0.25)', fontSize: 11, lineHeight: 1.6 }}>
+                Weather data via <strong style={{ color:'rgba(82,183,136,0.5)' }}>Open-Meteo</strong> (open-source, no API key required) &nbsp;·&nbsp;
+                Always follow pesticide label instructions &nbsp;·&nbsp; Consult your agronomist for crop-specific guidance
+              </p>
+            </div>
+          )}
+          </div>{/* /content zIndex wrapper */}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
