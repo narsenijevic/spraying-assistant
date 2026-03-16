@@ -91,12 +91,57 @@
       });
     }
 
-    /* status = 'green' | 'yellow' | 'red' */
-    function sprayStatus(wind, rain2h, rain4h) {
-      if (wind > 15 || rain2h >= 40)           return 'red';
-      if (wind >= 10 || rain4h >= 40)           return 'yellow';
-      if (wind >= 3)                             return 'green';
-      return 'yellow'; // < 3 mph — inversion / no-drift-dispersal risk
+    /* Enhanced spray status with multi-herbicide support */
+    function sprayStatus(wind, rain2h, rain4h, temp = null, selectedHerbs = []) {
+      // Basic weather safety checks (always apply)
+      if (wind > 15 || rain2h >= 40) return 'red';
+
+      // Multi-herbicide analysis for enhanced restrictions
+      let hasGroup4 = false, hasEster = false, hasDicamba = false;
+      let maxTempRestriction = null, minWindReq = 0, maxWindReq = 15;
+
+      if (selectedHerbs && selectedHerbs.length > 0) {
+        selectedHerbs.forEach(herb => {
+          // Check for Group 4 herbicides
+          if (herb.group === '4') {
+            hasGroup4 = true;
+
+            // Check for dicamba products
+            if (herb.moa && herb.moa.toLowerCase().includes('dicamba')) {
+              hasDicamba = true;
+              minWindReq = Math.max(minWindReq, 3);  // Dicamba: 3-10 mph required
+              maxWindReq = Math.min(maxWindReq, 10);
+            }
+
+            // Check for 2,4-D ester products
+            if (herb.ai && (herb.ai.toLowerCase().includes('ester') ||
+                (herb.formulation && herb.formulation.toLowerCase() === 'ec' && herb.moa && herb.moa.toLowerCase().includes('2,4-d')))) {
+              hasEster = true;
+              maxTempRestriction = maxTempRestriction ? Math.min(maxTempRestriction, 85) : 85;
+            }
+          }
+
+          // Apply individual herbicide restrictions (most restrictive wins)
+          if (herb.tempMax) maxTempRestriction = maxTempRestriction ? Math.min(maxTempRestriction, herb.tempMax) : herb.tempMax;
+          if (herb.windMax) maxWindReq = Math.min(maxWindReq, herb.windMax);
+          if (herb.windMin) minWindReq = Math.max(minWindReq, herb.windMin);
+        });
+      }
+
+      // Apply herbicide-specific restrictions
+      if (maxTempRestriction && temp && temp > maxTempRestriction) return 'red';
+      if (wind > maxWindReq) return 'red';
+      if (wind < minWindReq) return hasGroup4 ? 'red' : 'yellow'; // Group 4 = red, others = yellow for inversion
+
+      // Enhanced wind/rain logic
+      if (wind >= 10 || rain4h >= 40) return 'yellow';
+      if (wind >= 3) return 'green';
+      return 'yellow'; // < 3 mph — inversion risk
+    }
+
+    /* Basic spray status (legacy compatibility) */
+    function basicSprayStatus(wind, rain2h, rain4h) {
+      return sprayStatus(wind, rain2h, rain4h, null, []);
     }
 
     const STATUS_CFG = {
@@ -136,6 +181,102 @@
     };
 
     /* ─── Sub-components ──────────────────────────────────────── */
+    function LabelModal({ herb, isOpen, onClose }) {
+      if (!isOpen || !herb) return null;
+
+      return (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1000,
+          background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '20px'
+        }} onClick={onClose}>
+          <div style={{
+            background: '#fff', borderRadius: 20, padding: '32px', maxWidth: '600px', width: '100%',
+            maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.3)'
+          }} onClick={e => e.stopPropagation()}>
+
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
+              <div>
+                <h2 style={{ margin: '0 0 8px', fontSize: 24, fontWeight: 800, color: '#0f2d1e' }}>{herb.name}</h2>
+                <p style={{ margin: '0', color: '#059669', fontSize: 14, fontWeight: 600 }}>MOA Group {herb.group} • {herb.type} Herbicide</p>
+              </div>
+              <button onClick={onClose} style={{
+                background: 'rgba(239,68,68,0.1)', border: 'none', borderRadius: '8px',
+                padding: '8px', color: '#ef4444', fontSize: '20px', cursor: 'pointer'
+              }}>✕</button>
+            </div>
+
+            {/* Active Ingredient */}
+            <div style={{ marginBottom: '20px', padding: '16px', background: '#f0fdf9', borderRadius: '12px' }}>
+              <h3 style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 700, color: '#065f46', textTransform: 'uppercase', letterSpacing: 1 }}>Active Ingredient</h3>
+              <p style={{ margin: '0', fontSize: 16, fontWeight: 600, color: '#0f2d1e' }}>{herb.ai}</p>
+            </div>
+
+            {/* Application Details */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 20 }}>
+              <div style={{ padding: '12px', background: '#f9fafb', borderRadius: 8 }}>
+                <h4 style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase' }}>Application Rate</h4>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#1f2937' }}>{herb.rate}</p>
+              </div>
+              <div style={{ padding: '12px', background: '#f9fafb', borderRadius: 8 }}>
+                <h4 style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase' }}>Formulation</h4>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#1f2937' }}>{herb.formulation}</p>
+              </div>
+              <div style={{ padding: '12px', background: '#f9fafb', borderRadius: 8 }}>
+                <h4 style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase' }}>REI</h4>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#1f2937' }}>{herb.rei}</p>
+              </div>
+              <div style={{ padding: '12px', background: '#f9fafb', borderRadius: 8 }}>
+                <h4 style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase' }}>PHI</h4>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#1f2937' }}>{herb.phi}</p>
+              </div>
+            </div>
+
+            {/* Weather Restrictions */}
+            {(herb.windMin || herb.windMax || herb.tempMin || herb.tempMax) && (
+              <div style={{ marginBottom: 20, padding: '16px', background: '#fef3c7', border: '1px solid #fbbf24', borderRadius: 12 }}>
+                <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#92400e', textTransform: 'uppercase' }}>⚠️ Weather Restrictions</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 }}>
+                  {herb.windMin && <p style={{ margin: 0, fontSize: 13, color: '#92400e' }}>Min Wind: {herb.windMin} mph</p>}
+                  {herb.windMax && <p style={{ margin: 0, fontSize: 13, color: '#92400e' }}>Max Wind: {herb.windMax} mph</p>}
+                  {herb.tempMin && <p style={{ margin: 0, fontSize: 13, color: '#92400e' }}>Min Temp: {herb.tempMin}°F</p>}
+                  {herb.tempMax && <p style={{ margin: 0, fontSize: 13, color: '#92400e' }}>Max Temp: {herb.tempMax}°F</p>}
+                </div>
+              </div>
+            )}
+
+            {/* Target Weeds */}
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 700, color: '#065f46', textTransform: 'uppercase' }}>Target Weeds</h3>
+              <p style={{ margin: 0, fontSize: 14, color: '#374151', lineHeight: 1.6 }}>{herb.targetWeeds}</p>
+            </div>
+
+            {/* Crops */}
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 700, color: '#065f46', textTransform: 'uppercase' }}>Approved Crops</h3>
+              <p style={{ margin: 0, fontSize: 14, color: '#374151' }}>{herb.crops}</p>
+            </div>
+
+            {/* Important Notes */}
+            {herb.notes && (
+              <div style={{ padding: '16px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12 }}>
+                <h3 style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 700, color: '#dc2626', textTransform: 'uppercase' }}>⚠️ Important Notes</h3>
+                <p style={{ margin: 0, fontSize: 14, color: '#7f1d1d', lineHeight: 1.6 }}>{herb.notes}</p>
+              </div>
+            )}
+
+            {/* Disclaimer */}
+            <div style={{ marginTop: 24, padding: 12, background: '#f3f4f6', borderRadius: 8 }}>
+              <p style={{ margin: 0, fontSize: 11, color: '#6b7280', lineHeight: 1.4 }}>
+                <strong>DISCLAIMER:</strong> This information is for reference only. Always read and follow the current product label for complete application instructions, restrictions, and safety requirements.
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     function WindArrow({ deg, size = 18 }) {
       return (
         <svg width={size} height={size} viewBox="0 0 20 20" style={{ display:'inline-block', verticalAlign:'middle' }}>
@@ -184,18 +325,41 @@
       );
     }
 
-    function HourCell({ time, wind, dir, rain, isNow }) {
-      const st = sprayStatus(wind, rain, rain);
+    function HourCell({ time, wind, dir, rain, temp, isNow, selectedHerbs = [] }) {
+      const st = sprayStatus(wind, rain, rain, temp, selectedHerbs);
       const palette = {
         green:  { bg: '#f0fdf4', border: 'rgba(34,197,94,0.5)',  text: '#16a34a' },
         yellow: { bg: '#fffbeb', border: 'rgba(251,191,36,0.5)', text: '#b45309' },
         red:    { bg: '#fff1f2', border: 'rgba(239,68,68,0.5)',  text: '#dc2626' },
       };
       const p = palette[st];
+
+      // Enhanced tooltip with herbicide restrictions
+      let restrictions = [];
+      if (selectedHerbs && selectedHerbs.length > 0) {
+        selectedHerbs.forEach(herb => {
+          if (herb.group === '4') {
+            if (herb.moa && herb.moa.toLowerCase().includes('dicamba')) {
+              restrictions.push('Dicamba: 3-10 mph, ≤85°F');
+            }
+            if (herb.ai && herb.ai.toLowerCase().includes('ester')) {
+              restrictions.push('2,4-D Ester: ≤85°F critical');
+            }
+          }
+          if (herb.tempMax) restrictions.push(`Max temp: ${herb.tempMax}°F`);
+          if (herb.windMax) restrictions.push(`Max wind: ${herb.windMax} mph`);
+        });
+      }
+      const tooltipText = [
+        `${isNow ? 'NOW' : fmtHour(time)}`,
+        `${Math.round(wind)} mph wind, ${rain}% rain`,
+        temp ? `${Math.round(temp)}°F` : '',
+        ...restrictions
+      ].filter(Boolean).join(' • ');
       return (
-        <div className="frost-light" style={{
-          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
-          padding: '8px 10px', borderRadius: 10, minWidth: 62,
+        <div className="frost-light" title={tooltipText} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+          padding: '8px 8px', borderRadius: 10, minWidth: 68,
           background: p.bg, border: `1.5px solid ${p.border}`,
           boxShadow: isNow ? '0 0 0 2px #059669' : '0 1px 4px rgba(0,0,0,0.06)',
           outline: 'none'
@@ -206,10 +370,16 @@
           <span style={{ color: '#0f2d1e', fontSize: 15, fontWeight: 800 }}>
             {Math.round(wind)}
           </span>
-          <span style={{ color: 'rgba(15,45,30,0.88)', fontSize: 10 }}>mph</span>
-          <span style={{ color: p.text }}><WindArrow deg={dir} size={16} /></span>
-          <span style={{ color: 'rgba(15,45,30,0.85)', fontSize: 10 }}>{degToCompass(dir)}</span>
-          <span style={{ color: 'rgba(15,45,30,0.88)', fontSize: 10 }}>🌧 {rain}%</span>
+          <span style={{ color: 'rgba(15,45,30,0.88)', fontSize: 9 }}>mph</span>
+          <span style={{ color: p.text }}><WindArrow deg={dir} size={14} /></span>
+          <span style={{ color: 'rgba(15,45,30,0.85)', fontSize: 9 }}>{degToCompass(dir)}</span>
+          {temp && (
+            <span style={{ color: 'rgba(15,45,30,0.88)', fontSize: 9 }}>🌡 {Math.round(temp)}°F</span>
+          )}
+          <span style={{ color: 'rgba(15,45,30,0.88)', fontSize: 9 }}>🌧 {rain}%</span>
+          {selectedHerbs && selectedHerbs.length > 0 && (
+            <div style={{ width: 4, height: 4, borderRadius: 2, background: p.text, marginTop: 1 }} />
+          )}
         </div>
       );
     }
@@ -386,8 +556,8 @@
         pressure: '20–40 PSI',
         nozzles: [
           {
-            tag: 'LABEL REQUIRED',
-            tagColor: '#f87171',
+            tag: 'OPTIMAL — STANDARD',
+            tagColor: '#059669',
             model: 'TeeJet TTI11004VP',
             series: 'TurboDrop Twin Induction (TTI)',
             pattern: '110° air induction twin flat fan',
@@ -397,11 +567,11 @@
             driftReduction: '> 95% vs. XR baseline',
             pressure: '20–40 PSI',
             flow: '0.40 gpm @ 40 PSI',
-            desc: 'Required nozzle class for XtendiMax, Engenia, and FeXapan. TTI air-induction twin fan produces XC–UC droplets meeting the Extremely Coarse minimum mandated by current dicamba product labels. Lower pressure = coarser droplet.',
-            best: 'All labeled dicamba products on Xtend soybean and XtendFlex/Bollgard cotton',
+            desc: 'OPTIMAL nozzle for dicamba applications. Required nozzle class for XtendiMax, Engenia, and FeXapan. Produces most consistent XC–UC droplets meeting EPA label requirements. Standard 0.4 GPM flow rate works for most boom setups.',
+            best: 'Primary choice for all dicamba products — most widely approved',
           },
           {
-            tag: 'LABEL APPROVED',
+            tag: 'ALTERNATIVE APPROVED',
             tagColor: '#fca5a5',
             model: 'TeeJet AITTJ60-11006',
             series: 'Air Induction TwinJet (AITTJ)',
@@ -412,8 +582,23 @@
             driftReduction: '> 90% vs. XR baseline',
             pressure: '20–60 PSI',
             flow: '0.60 gpm @ 40 PSI',
-            desc: 'Alternative approved nozzle for dicamba labels. Produces VC–XC droplets — verify the specific size (06 = 0.6 gpm @ 40 PSI) meets your label\'s nozzle list. Always cross-check with the approved nozzle table in your product label.',
-            best: 'Alternative when TTI11004VP is unavailable — confirm against label approved list',
+            desc: 'Alternative approved nozzle for dicamba labels. Higher flow rate (0.6 vs 0.4 GPM) useful for higher-speed applications. Verify specific model against your product\'s approved nozzle list before use.',
+            best: 'Higher volume applications or when TTI11004VP unavailable',
+          },
+          {
+            tag: 'SPECIALTY APPROVED',
+            tagColor: '#a855f7',
+            model: 'Hypro Guardian Air GA110-04',
+            series: 'Guardian Air (GA)',
+            pattern: '110° air induction flat fan',
+            droplet: 'Extremely Coarse (XC)',
+            dropletColor: '#b91c1c',
+            asabe: 'ASABE XC',
+            driftReduction: '> 95% vs. XR baseline',
+            pressure: '15–40 PSI',
+            flow: '0.40 gpm @ 40 PSI',
+            desc: 'Specialty air-induction nozzle approved on select dicamba labels. Single flat-fan design vs. twin-fan. Excellent XC droplets at lower pressures (15–25 PSI). Check specific product label — not approved on all dicamba products.',
+            best: 'Low-pressure applications requiring maximum coarseness — verify label approval',
           },
         ],
         tips: [
@@ -453,12 +638,12 @@
             driftReduction: '≈ 50% vs. XR baseline',
             pressure: '30–60 PSI',
             flow: '0.40 gpm @ 40 PSI',
-            desc: 'Minimum nozzle for 2,4-D ester in low-wind, cool conditions. Air induction reduces the fine droplet fraction that is most susceptible to volatilization and physical drift. Use only when wind < 7 mph AND temperature < 75°F.',
-            best: '2,4-D ester when wind < 7 mph and temperature < 75°F',
+            desc: 'Minimum nozzle requirement for 2,4-D ester formulations (Colex-D, Formula 40, etc.) in ideal conditions. Air induction reduces fine droplets prone to volatilization. Use only when wind < 7 mph AND temperature < 75°F.',
+            best: 'Cool conditions (<75°F) with minimal wind (<7 mph)',
           },
           {
-            tag: 'PREFERRED ≥ 75°F',
-            tagColor: '#fdba74',
+            tag: 'OPTIMAL — WARM CONDITIONS',
+            tagColor: '#059669',
             model: 'TeeJet TTI11004VP',
             series: 'TurboDrop Twin Induction (TTI)',
             pattern: '110° air induction twin flat fan',
@@ -468,17 +653,33 @@
             driftReduction: '> 95% vs. XR baseline',
             pressure: '20–40 PSI',
             flow: '0.40 gpm @ 40 PSI',
-            desc: 'Preferred nozzle for 2,4-D ester when temperatures are elevated (≥ 75°F) or wind is 7–10 mph. XC–UC droplets dramatically reduce the fine fraction available for off-target movement and vapor-phase drift.',
-            best: '2,4-D ester when temperature ≥ 75°F or wind is 7–10 mph',
+            desc: 'OPTIMAL choice for 2,4-D ester when temperature ≥ 75°F or wind 7–10 mph. Produces the coarsest droplets possible while maintaining coverage. Significantly reduces fine droplet fraction that causes off-target volatilization.',
+            best: 'Warm conditions (≥75°F) or moderate wind (7–10 mph) — BEST drift protection',
+          },
+          {
+            tag: 'ENHANCED COVERAGE',
+            tagColor: '#0369a1',
+            model: 'TeeJet AITTJ60-11005',
+            series: 'Air Induction TwinJet (AITTJ)',
+            pattern: '110° air induction twin flat fan',
+            droplet: 'Very Coarse–Extremely Coarse (VC–XC)',
+            dropletColor: '#ef4444',
+            asabe: 'ASABE VC / XC',
+            driftReduction: '> 90% vs. XR baseline',
+            pressure: '15–60 PSI',
+            flow: '0.50 gpm @ 40 PSI',
+            desc: 'Alternative for enhanced coverage in thick crop canopies while maintaining VC-XC droplets. Higher flow rate (0.50 vs 0.40 GPM) delivers more droplets per square inch. Good option for dense weed populations or thick crop cover.',
+            best: 'Dense canopies requiring enhanced penetration with drift control',
           },
         ],
         tips: [
-          'DO NOT APPLY ABOVE 85°F: Ester formulations volatilize aggressively in hot conditions — vapor can drift miles. If temps above 85°F are forecast, switch to a low-volatility 2,4-D amine or choline salt.',
-          'WIND: Keep below 10 mph. Below 3 mph can also be risky due to temperature inversions — ideal window is 3–10 mph with a steady direction away from sensitive areas.',
-          'BUFFERS: Stay well clear of grape vineyards, fruit trees, vegetable gardens, ornamental broadleaves, and tobacco — ester drift and vapor can cause injury at distances > 300 ft under warm conditions.',
-          'NOZZLE UPGRADE: At temperatures ≥ 75°F, step up from AIXR to TTI nozzles (XC–UC droplets) — the additional reduction in fine droplet fraction is significant for esters.',
-          'APPLY EARLY MORNING: The best window for ester applications is early morning (before 9 AM) when temperatures are lowest, wind is typically calmer, and boundary layer mixing reduces vapor concentration.',
-          'ADJUVANTS: Do not add extra surfactant beyond label rate — additional surfactant can increase coverage of fine droplets that carry ester vapor off-target.',
+          'TEMPERATURE CRITICAL: DO NOT APPLY ABOVE 85°F. Ester formulations (Colex-D, Formula 40, etc.) volatilize rapidly in hot conditions — vapor can drift miles off-target. Switch to low-volatility 2,4-D amine or choline salt if temps >85°F forecast.',
+          'WIND WINDOW: Keep between 3–10 mph. Below 3 mph = inversion risk, above 10 mph = label violation. Monitor for consistent wind direction away from sensitive crops (grapes, tomatoes, cotton, ornamentals).',
+          'DROPLET SIZE MANDATORY: Coarse (C) minimum required at <75°F, Very Coarse-Extremely Coarse (VC-XC) required ≥75°F or wind >7 mph. Fine/Medium droplets carry more volatilized ester and travel farther off-target.',
+          'SENSITIVE CROP BUFFERS: Maintain >500 ft from grapes, tree fruits, vegetables, cotton, and ornamentals. Ester vapor can cause injury even without visible drift. Check state regulations — some require 1/2 mile buffers.',
+          'OPTIMAL APPLICATION TIMING: Early morning (6–9 AM) before temperatures rise and while humidity is higher. Avoid afternoon applications — temperature and volatility risk peak 2–6 PM.',
+          'NOZZLE SELECTION: AIXR minimum for cool conditions (<75°F), TTI optimal for warm/windy conditions (≥75°F or ≥7 mph wind), AITTJ for dense canopy requiring higher volume.',
+          'RECORD KEEPING: Document exact application time, wind speed/direction, temperature, and RH — required for potential damage investigations. Many states mandate specific record retention periods.',
         ],
       },
     };
@@ -493,16 +694,33 @@
       { code: 'UC', label: 'Ultra Coarse',   color: '#7f1d1d' },
     ];
 
-    function NozzleCard({ nozzle }) {
+    function NozzleCard({ nozzle, isOptimal = false }) {
       return (
         <div className="frost-light" style={{
           flex: 1, minWidth: 260,
-          background: '#f0fdf9',
-          border: '1px solid rgba(5,150,105,0.13)',
+          background: isOptimal ? '#ecfdf5' : '#f0fdf9',
+          border: isOptimal ? '2px solid #059669' : '1px solid rgba(5,150,105,0.13)',
           borderRadius: 14, padding: 18,
           display: 'flex', flexDirection: 'column', gap: 10,
-          boxShadow: '0 4px 24px rgba(0,0,0,0.06)'
+          boxShadow: isOptimal ? '0 8px 32px rgba(5,150,105,0.25), 0 0 0 4px rgba(5,150,105,0.08)' : '0 4px 24px rgba(0,0,0,0.06)',
+          position: 'relative',
         }}>
+          {isOptimal && (
+            <div style={{
+              position: 'absolute',
+              top: -8,
+              right: 12,
+              background: '#059669',
+              color: '#fff',
+              fontSize: 10,
+              fontWeight: 700,
+              padding: '4px 8px',
+              borderRadius: 6,
+              letterSpacing: 0.5,
+            }}>
+              ⭐ OPTIMAL FOR CURRENT CONDITIONS
+            </div>
+          )}
           {/* Header row */}
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap: 8 }}>
             <span style={{
@@ -555,6 +773,293 @@
           </div>
         </div>
       );
+    }
+
+    /* ─── Comprehensive Greenbook URL Mapping Database ──────────── */
+    const GREENBOOK_URL_MAP = {
+      /* Group 9 - EPSPS (Glyphosate) */
+      'roundup-powermax3': 'Roundup PowerMAX',
+      'durango-dma': 'Durango DMA',
+      'enlist-one': 'Enlist One',
+      'roundup-weathermax': 'Roundup WeatherMAX',
+      'rt3': 'RT3 glyphosate',
+      'glyphomax-plus': 'GlyphoMax Plus',
+      'accord-xrt-ii': 'Accord XRT',
+      'credit-41-extra': 'Credit 41',
+      'buccaneer-plus': 'Buccaneer Plus',
+
+      /* Group 4 - Synthetic Auxins */
+      'xtendimax': 'XtendiMax VaporGrip',
+      'xtend-flex-burndown': 'XtendiMax burndown',
+      'engenia': 'Engenia dicamba',
+      'fexapan': 'FeXapan dicamba',
+      'clarity': 'Clarity dicamba',
+      'banvel': 'Banvel dicamba',
+      'enlist-duo': 'Enlist Duo',
+      'weedone-lv4': 'Weedone LV4',
+      'soluamine-6': 'Soluamine 6',
+      'enlist-one-24d': 'Enlist One 2,4-D',
+      'starane-ultra': 'Starane Ultra',
+      'stinger': 'Stinger clopyralid',
+      'tordon-22k': 'Tordon 22K',
+      'milestone': 'Milestone aminopyralid',
+      'mcpa-amine': 'MCPA Amine',
+
+      /* Group 10 - Glufosinate */
+      'liberty-280sl': 'Liberty 280 SL',
+      'interline': 'Interline glufosinate',
+      'rely-280': 'Rely 280',
+      'lifeline': 'Lifeline glufosinate',
+
+      /* Group 5 - Photosystem II */
+      'cheetah': 'Cheetah herbicide',
+      'aatrex-4l': 'AAtrex atrazine',
+      'bicep-ii-magnum': 'Bicep II Magnum',
+      'princep': 'Princep simazine',
+      'sencor-4f': 'Sencor metribuzin',
+      'lorox': 'Lorox linuron',
+      'cotoran': 'Cotoran fluometuron',
+      'diuron-4l': 'Diuron 4L',
+      'lexone': 'Lexone metribuzin',
+      'velpar-l': 'Velpar hexazinone',
+
+      /* Group 2 - ALS Inhibitors */
+      'classic': 'Classic chlorimuron',
+      'harmony-gt': 'Harmony GT',
+      'pursuit': 'Pursuit imazethapyr',
+      'raptor': 'Raptor imazamox',
+      'firstrate': 'FirstRate cloransulam',
+      'basis': 'Basis rimsulfuron',
+      'accent-q': 'Accent Q nicosulfuron',
+      'option': 'Option foramsulfuron',
+      'steadfast-q': 'Steadfast Q',
+      'synchrony-xp': 'Synchrony XP',
+      'amber': 'Amber triasulfuron',
+      'peak': 'Peak prosulfuron',
+      'canopy-xt': 'Canopy XT',
+      'python': 'Python flumetsulam',
+      'spartan-charge': 'Spartan Charge',
+      'valor-xlt': 'Valor XLT',
+
+      /* Group 1 - ACCase Inhibitors */
+      'select-max': 'Select Max clethodim',
+      'poast': 'Poast sethoxydim',
+      'assure-ii': 'Assure II quizalofop',
+      'axial-xtra': 'Axial XTra pinoxaden',
+      'puccini': 'Puccini pinoxaden',
+      'poast-plus': 'Poast Plus',
+      'arrow-2ec': 'Arrow 2EC',
+      'fusion': 'Fusion fluazifop',
+
+      /* Group 27 - HPPD Inhibitors */
+      'callisto': 'Callisto mesotrione',
+      'laudis': 'Laudis tembotrione',
+      'balance-flexx': 'Balance Flexx isoxaflutole',
+      'impact': 'Impact topramezone',
+      'armezon': 'Armezon topramezone',
+      'capreno': 'Capreno tembotrione',
+      'acuron': 'Acuron herbicide',
+      'solstice': 'Solstice herbicide',
+
+      /* Group 14 - PPO Inhibitors */
+      'cobra': 'Cobra lactofen',
+      'flexstar': 'Flexstar fomesafen',
+      'flexstar-gt': 'Flexstar GT',
+      'reflex': 'Reflex fomesafen',
+      'ultra-blazer': 'Ultra Blazer acifluorfen',
+      'valor-ew': 'Valor EW',
+      'sharpen': 'Sharpen saflufenacil',
+      'goal-2xl': 'Goal 2XL oxyfluorfen',
+      'authority-first': 'Authority First',
+
+      /* Group 15 - VLCFA Inhibitors */
+      'zidua': 'Zidua pyroxasulfone',
+      'dual-magnum': 'Dual Magnum S-metolachlor',
+      'harness': 'Harness acetochlor',
+      'outlook': 'Outlook dimethenamid',
+      'warrant': 'Warrant acetochlor',
+      'warrant-ultra': 'Warrant Ultra',
+      'define': 'Define SC',
+      'boundary-6-5ec': 'Boundary 6.5EC',
+      'intrro': 'Intrro alachlor',
+
+      /* Group 3 - Microtubule Inhibitors */
+      'prowl-h2o': 'Prowl H2O pendimethalin',
+      'treflan': 'Treflan trifluralin',
+      'sonalan': 'Sonalan ethalfluralin',
+      'curbit': 'Curbit EC ethalfluralin',
+      'trifluralin-4ec': 'Trifluralin 4EC',
+
+      /* Group 22 - Photosystem I */
+      'gramoxone-sl': 'Gramoxone SL paraquat',
+      'gramoxone-inteon': 'Gramoxone Inteon',
+      'diquat-herbicide': 'Diquat herbicide',
+
+      /* Other Groups & Combinations */
+      'buctril': 'Buctril bromoxynil',
+      'maestro-5ec': 'Maestro 5EC',
+      'bronate': 'Bronate Advanced',
+      'command-3me': 'Command 3ME',
+      'commence': 'Commence clomazone',
+      'krenite-s': 'Krenite S',
+      'halex-gt': 'Halex GT',
+      'prefix': 'Prefix herbicide',
+      'sequence': 'Sequence herbicide',
+      'corvus': 'Corvus herbicide',
+      'verdict': 'Verdict saflufenacil',
+      'resicore': 'Resicore herbicide',
+      'status': 'Status herbicide',
+      'tervigo': 'Tervigo herbicide',
+      'autumn-super': 'Autumn Super',
+      'afforia': 'Afforia herbicide',
+      'everest-30-wdg': 'Everest 3.0 WDG',
+      'olympus-flex': 'Olympus Flex',
+      'matador': 'Matador herbicide',
+      'survive': 'Survive herbicide',
+      'quelex': 'Quelex herbicide',
+      'trivita': 'TriVita herbicide',
+      'trivita-soybean': 'TriVita soybean',
+      'fierce-xlt': 'Fierce XLT',
+      'reviton': 'Reviton herbicide',
+      'kyro': 'Kyro herbicide',
+      'interlock': 'Interlock herbicide',
+      'elevore': 'Elevore herbicide'
+    };
+
+    /* ─── Helper function to get optimal Greenbook search term ─── */
+    function getGreenbookSearchTerm(herbicide) {
+      // First try the mapped term
+      if (GREENBOOK_URL_MAP[herbicide.id]) {
+        return GREENBOOK_URL_MAP[herbicide.id];
+      }
+
+      // If no mapping, try the product name
+      if (herbicide.name) {
+        return herbicide.name;
+      }
+
+      // Last resort: use active ingredient
+      if (herbicide.ai) {
+        const ai = herbicide.ai.split('(')[0].trim(); // Extract main AI name
+        return ai;
+      }
+
+      return 'herbicide'; // Fallback
+    }
+
+    /* ─── Enhanced Greenbook link with fallback system ─── */
+    function createGreenbookLink(herbicide) {
+      const primaryTerm = getGreenbookSearchTerm(herbicide);
+
+      // Since Greenbook's URL structure changes frequently, we'll try the most likely formats
+      // If one doesn't work, users can easily search manually with the provided term
+      const possibleUrls = [
+        `https://www.greenbook.net/search?q=${encodeURIComponent(primaryTerm)}`,
+        `https://www.greenbook.net/products?q=${encodeURIComponent(primaryTerm)}`,
+        `https://www.greenbook.net/?search=${encodeURIComponent(primaryTerm)}`,
+        `https://www.greenbook.net/SearchResults.aspx?SearchTerms=${encodeURIComponent(primaryTerm)}`
+      ];
+
+      // Use the first format, but we'll add a fallback button later
+      return possibleUrls[0];
+    }
+
+    /* ─── Greenbook search with multiple URL attempt system ─── */
+    function openGreenbookSearch(herbicide, event) {
+      event.preventDefault();
+      const searchTerm = getGreenbookSearchTerm(herbicide);
+
+      // Multiple URL formats to try (Greenbook changes their structure frequently)
+      const urlAttempts = [
+        `https://www.greenbook.net/search?q=${encodeURIComponent(searchTerm)}`,
+        `https://www.greenbook.net/products?search=${encodeURIComponent(searchTerm)}`,
+        `https://www.greenbook.net/?s=${encodeURIComponent(searchTerm)}`,
+        `https://www.greenbook.net/herbicides?search=${encodeURIComponent(searchTerm)}`,
+        // Fallback to main site
+        `https://www.greenbook.net`
+      ];
+
+      // Try the first URL format
+      const primaryUrl = urlAttempts[0];
+      let success = false;
+
+      try {
+        const newWindow = window.open(primaryUrl, '_blank', 'noopener,noreferrer');
+
+        if (newWindow) {
+          success = true;
+
+          // Provide helpful feedback
+          setTimeout(() => {
+            // Check if we need to provide search instructions
+            if (primaryUrl === 'https://www.greenbook.net') {
+              // We fell back to main site
+              if (confirm(`🔍 Greenbook opened!\n\nSearch manually for: "${searchTerm}"\n\nCopy search term to clipboard?`)) {
+                navigator.clipboard.writeText(searchTerm).catch(() => {
+                  prompt('Copy this search term for Greenbook:', searchTerm);
+                });
+              }
+            } else {
+              // We tried a search URL - show a toast-like message
+              console.log(`🔍 Greenbook search opened for: ${searchTerm}`);
+            }
+          }, 500);
+        }
+      } catch (error) {
+        console.warn('Greenbook search failed:', error);
+      }
+
+      // Fallback if primary method fails
+      if (!success) {
+        const fallbackWindow = window.open('https://www.greenbook.net', '_blank', 'noopener,noreferrer');
+
+        setTimeout(() => {
+          if (confirm(`🔍 Greenbook opened in new tab.\n\nSearch for: "${searchTerm}"\n\nCopy search term to clipboard?`)) {
+            navigator.clipboard.writeText(searchTerm).catch(() => {
+              prompt('Copy this search term for Greenbook:', searchTerm);
+            });
+          }
+        }, 800);
+      }
+
+      return false;
+    }
+
+    /* ─── Alternative search terms for backup links ─── */
+    function getAlternativeSearchTerms(herbicide) {
+      const alternatives = [];
+
+      // Add brand name variations
+      if (herbicide.name && !GREENBOOK_URL_MAP[herbicide.id]) {
+        alternatives.push(herbicide.name.replace(/[^\w\s]/g, '').trim());
+      }
+
+      // Add active ingredient
+      if (herbicide.ai) {
+        const ai = herbicide.ai.split(/[(%]/)[0].trim();
+        if (ai !== getGreenbookSearchTerm(herbicide)) {
+          alternatives.push(ai);
+        }
+      }
+
+      // Add manufacturer if identifiable
+      const manufMap = {
+        'Roundup': 'Bayer',
+        'XtendiMax': 'Bayer',
+        'Liberty': 'BASF',
+        'Clarity': 'BASF',
+        'Dual': 'Syngenta',
+        'Callisto': 'Syngenta',
+        'Gramoxone': 'Syngenta'
+      };
+
+      Object.keys(manufMap).forEach(brand => {
+        if (herbicide.name.includes(brand)) {
+          alternatives.push(`${brand} ${manufMap[brand]}`);
+        }
+      });
+
+      return alternatives.slice(0, 2); // Limit to 2 alternatives
     }
 
     /* ─── Herbicide Database ──────────────────────────────────── */
@@ -756,7 +1261,7 @@
       return GROUP_COLORS[first] || '#94a3b8';
     }
 
-    function HerbicideCard({ herb, onRemove, weather, curTemp, curWind, rain2h }) {
+    function HerbicideCard({ herb, onRemove, weather, curTemp, curWind, rain2h, setLabelModal }) {
       const [expanded, setExpanded] = React.useState(false);
       const gc = groupColor(herb.group);
       const compliance = weather ? checkLabelCompliance(herb, curWind, curTemp, rain2h) : null;
@@ -788,12 +1293,12 @@
               <button onClick={() => setExpanded(e => !e)} style={{ background:'#ecfdf5', border:'1px solid rgba(5,150,105,0.16)', borderRadius:8, padding:'5px 12px', color:'rgba(15,45,30,0.8)', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:'inherit' }}>
                 {expanded ? 'Less ▲' : 'Details ▼'}
               </button>
-              <a href={`https://www.greenbook.net/products?q=${encodeURIComponent(herb.name)}`} target="_blank" rel="noopener noreferrer" style={{ background:'#ecfdf5', border:'1px solid rgba(5,150,105,0.16)', borderRadius:8, padding:'5px 12px', color:'rgba(15,45,30,0.8)', fontSize:12, fontWeight:600, textDecoration:'none', whiteSpace:'nowrap' }}>
-                Greenbook ↗
-              </a>
-              <a href={`https://www.cdms.net/LabelsMSDS/LMDefault.aspx?pd=search&t=${encodeURIComponent(herb.name)}`} target="_blank" rel="noopener noreferrer" style={{ background:'rgba(96,165,250,0.08)', border:'1px solid rgba(96,165,250,0.2)', borderRadius:8, padding:'5px 12px', color:'rgba(147,197,253,0.8)', fontSize:12, fontWeight:600, textDecoration:'none', whiteSpace:'nowrap' }}>
-                CDMS Label ↗
-              </a>
+              <button onClick={() => setLabelModal({ isOpen: true, herb })} style={{ background:'#ecfdf5', border:'1px solid rgba(5,150,105,0.16)', borderRadius:8, padding:'5px 12px', color:'rgba(15,45,30,0.8)', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:'inherit' }}>
+                📋 Label Info
+              </button>
+              <button onClick={(e) => openGreenbookSearch(herb, e)} style={{ background:'rgba(96,165,250,0.08)', border:'1px solid rgba(96,165,250,0.2)', borderRadius:8, padding:'5px 12px', color:'rgba(37,99,235,0.9)', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:'inherit', whiteSpace:'nowrap' }} title={`🔍 Search Greenbook for: "${getGreenbookSearchTerm(herb)}"\n\nClick to open Greenbook with optimized search term.\nIf search doesn't work automatically, you'll get the search term to copy.`}>
+                📚 Greenbook ↗
+              </button>
               <button onClick={() => onRemove(herb.id)} style={{ background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.25)', borderRadius:8, padding:'5px 10px', color:'#f87171', fontSize:14, cursor:'pointer', fontFamily:'inherit', lineHeight:1 }}>✕</button>
             </div>
           </div>
@@ -856,7 +1361,7 @@
     }
 
     /* ─── Herbicide Selector ─────────────────────────────────── */
-    function HerbicideSelector({ selected, onAdd, onRemove, weather, curTemp, curWind, rain2h, selectedCrop, setSelectedCrop }) {
+    function HerbicideSelector({ selected, onAdd, onRemove, weather, curTemp, curWind, rain2h, selectedCrop, setSelectedCrop, setLabelModal }) {
       const [q, setQ]             = React.useState('');
       const [sugs, setSugs]       = React.useState([]);
       const [open, setOpen]       = React.useState(false);
@@ -951,7 +1456,7 @@
           {selected.length > 0 && (
             <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
               {selected.map(h => (
-                <HerbicideCard key={h.id} herb={h} onRemove={onRemove} weather={weather} curTemp={curTemp} curWind={curWind} rain2h={rain2h} />
+                <HerbicideCard key={h.id} herb={h} onRemove={onRemove} weather={weather} curTemp={curTemp} curWind={curWind} rain2h={rain2h} setLabelModal={setLabelModal} />
               ))}
             </div>
           )}
@@ -966,7 +1471,7 @@
       );
     }
 
-    function SprayRecommendations({ windSpeed, status, selectedHerbs = [] }) {
+    function SprayRecommendations({ windSpeed, curTemp, status, selectedHerbs = [] }) {
       /* ── Tank-mix volatility analysis ── */
       const dicambaHerbs = selectedHerbs.filter(h =>
         h.moa && h.moa.toLowerCase().includes('dicamba')
@@ -986,6 +1491,20 @@
       const effectiveTier = isDicamba ? 'dicamba' : is24DEster ? 'ester' : baseTier;
       const wasEscalated  = effectiveTier !== baseTier;
       const rec = NOZZLE_RECS[effectiveTier];
+
+      /* ── Dynamic optimal nozzle selection based on conditions ── */
+      const getOptimalNozzle = (nozzles, curTemp, windSpeed, effectiveTier) => {
+        if (effectiveTier === 'ester') {
+          // For 2,4-D ester: temp >= 75°F or wind 7-10 = TTI optimal, else AIXR minimum
+          if (curTemp >= 75 || windSpeed >= 7) return 1; // TTI (OPTIMAL — WARM CONDITIONS)
+          return 0; // AIXR (MINIMUM REQUIRED)
+        } else if (effectiveTier === 'dicamba') {
+          // For dicamba: TTI is always optimal standard choice
+          return 0; // TTI (OPTIMAL — STANDARD)
+        }
+        // For non-Group 4: first nozzle is typically primary
+        return 0;
+      };
 
       /* ── Dicamba-specific wind window compliance flags ── */
       const dicambaWindTooLow  = isDicamba && windSpeed < 3;
@@ -1132,7 +1651,10 @@
 
           {/* Nozzle cards */}
           <div style={{ display:'flex', gap: 14, flexWrap:'wrap' }}>
-            {rec.nozzles.map((n, i) => <NozzleCard key={i} nozzle={n} />)}
+            {rec.nozzles.map((n, i) => {
+              const optimalIndex = getOptimalNozzle(rec.nozzles, curTemp, windSpeed, effectiveTier);
+              return <NozzleCard key={i} nozzle={n} isOptimal={i === optimalIndex} />;
+            })}
           </div>
 
           {/* Application parameters */}
@@ -1566,7 +2088,7 @@
     ];
 
     /* ─── Forecast Chart (SVG sparkline) ─────────────────────── */
-    function ForecastChart({ hourly }) {
+    function ForecastChart({ hourly, selectedHerbs = [] }) {
       if (!hourly || hourly.length === 0) return null;
       const W = 860, H = 160, padL = 42, padR = 42, padT = 16, padB = 28;
       const plotW = W - padL - padR;
@@ -1581,15 +2103,27 @@
       const yWindOf = (v) => padT + plotH - ((v / maxWind) * plotH);
       const yTempOf = (v) => padT + plotH - (((v - minTemp) / tempRange) * plotH * 0.7 + plotH * 0.15);
 
-      /* Spray window shading */
+      /* Enhanced spray window shading with herbicide logic */
       const bands = [];
       let start = null;
       pts.forEach((h, i) => {
-        const ok = h.wind <= 15 && h.rain < 50 && (h.temp||50) >= 40;
+        const status = sprayStatus(h.wind, h.rain, h.rain, h.temp, selectedHerbs);
+        const ok = status === 'green';
         if (ok && start === null) start = i;
-        if (!ok && start !== null) { bands.push([start, i-1]); start = null; }
+        if (!ok && start !== null) { bands.push([start, i-1, 'green']); start = null; }
       });
-      if (start !== null) bands.push([start, pts.length-1]);
+      if (start !== null) bands.push([start, pts.length-1, 'green']);
+
+      /* Add caution bands (yellow status) */
+      const cautionBands = [];
+      start = null;
+      pts.forEach((h, i) => {
+        const status = sprayStatus(h.wind, h.rain, h.rain, h.temp, selectedHerbs);
+        const ok = status === 'yellow';
+        if (ok && start === null) start = i;
+        if (!ok && start !== null) { cautionBands.push([start, i-1, 'yellow']); start = null; }
+      });
+      if (start !== null) cautionBands.push([start, pts.length-1, 'yellow']);
 
       /* Wind polyline — color per segment */
       const windSegs = pts.slice(0,-1).map((h,i) => {
@@ -1613,11 +2147,17 @@
 
       return (
         <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',height:'auto',display:'block',overflow:'visible'}}>
-          {/* Spray window bands */}
+          {/* Green spray window bands */}
           {bands.map(([a,b],k) => (
-            <rect key={k}
+            <rect key={`green-${k}`}
               x={xOf(a)} y={padT} width={xOf(b)-xOf(a)} height={plotH}
-              fill="rgba(34,197,94,0.08)" />
+              fill="rgba(34,197,94,0.12)" stroke="rgba(34,197,94,0.2)" strokeWidth="0.5" />
+          ))}
+          {/* Yellow caution bands */}
+          {cautionBands.map(([a,b],k) => (
+            <rect key={`yellow-${k}`}
+              x={xOf(a)} y={padT} width={xOf(b)-xOf(a)} height={plotH}
+              fill="rgba(251,191,36,0.08)" stroke="rgba(251,191,36,0.15)" strokeWidth="0.5" strokeDasharray="2 2" />
           ))}
           {/* Wind threshold lines */}
           {[7,10,15].map(v => v<=maxWind+2 && (
@@ -1663,10 +2203,12 @@
           <text x={padL+66} y={padT-2} fontSize="9" fill="rgba(15,45,30,0.82)">7–10</text>
           <circle cx={padL+108} cy={padT-6} r="4" fill="#dc2626" />
           <text x={padL+116} y={padT-2} fontSize="9" fill="rgba(15,45,30,0.82)">&gt;10 mph</text>
-          <rect x={padL+160} y={padT-10} width={18} height={8} fill="rgba(34,197,94,0.2)" />
-          <text x={padL+182} y={padT-2} fontSize="9" fill="rgba(15,45,30,0.82)">Spray window</text>
-          <line x1={padL+272} y1={padT-6} x2={padL+290} y2={padT-6} stroke="rgba(37,99,235,0.5)" strokeWidth="1.5" strokeDasharray="4 3" />
-          <text x={padL+294} y={padT-2} fontSize="9" fill="rgba(15,45,30,0.82)">Temp (°F)</text>
+          <rect x={padL+160} y={padT-10} width={16} height={8} fill="rgba(34,197,94,0.15)" stroke="rgba(34,197,94,0.3)" strokeWidth="0.5" />
+          <text x={padL+180} y={padT-2} fontSize="9" fill="rgba(15,45,30,0.82)">GO</text>
+          <rect x={padL+200} y={padT-10} width={16} height={8} fill="rgba(251,191,36,0.1)" stroke="rgba(251,191,36,0.2)" strokeWidth="0.5" strokeDasharray="2 2" />
+          <text x={padL+220} y={padT-2} fontSize="9" fill="rgba(15,45,30,0.82)">CAUTION</text>
+          <line x1={padL+270} y1={padT-6} x2={padL+288} y2={padT-6} stroke="rgba(37,99,235,0.5)" strokeWidth="1.5" strokeDasharray="4 3" />
+          <text x={padL+292} y={padT-2} fontSize="9" fill="rgba(15,45,30,0.82)">Temp (°F)</text>
         </svg>
       );
     }
@@ -1979,6 +2521,7 @@
       const [showNozzleCalc, setShowNozzleCalc] = useState(false);
       const [fieldAcres, setFieldAcres]       = useState('');
       const [selectedCrop, setSelectedCrop]   = useState('all');
+      const [labelModal, setLabelModal]     = useState({ isOpen: false, herb: null });
       const searchWrapRef = useRef(null);
       const debounceRef   = useRef(null);
 
@@ -2093,7 +2636,7 @@
 
         curRain2h = Math.max(...precip.slice(idx, idx + 2).map(v => v ?? 0));
         const rain4h = Math.max(...precip.slice(idx, idx + 4).map(v => v ?? 0));
-        status = sprayStatus(curWind, curRain2h, rain4h);
+        status = sprayStatus(curWind, curRain2h, rain4h, curTemp, selectedHerbs);
 
         /* Inversion risk: calm wind is the primary signal */
         inversionRisk = curWind < 3;
@@ -2108,12 +2651,12 @@
           isNow: i === 0,
         }));
 
-        windows = hourly.filter(h => sprayStatus(h.wind, h.rain, h.rain) === 'green');
+        windows = hourly.filter(h => sprayStatus(h.wind, h.rain, h.rain, h.temp, selectedHerbs) === 'green');
 
         /* Group consecutive green hours into time blocks */
         let gb = null;
         for (const h of hourly) {
-          const ok = sprayStatus(h.wind, h.rain, h.rain) === 'green';
+          const ok = sprayStatus(h.wind, h.rain, h.rain, h.temp, selectedHerbs) === 'green';
           if (ok) { if (!gb) gb = { start: h, end: h, hours: [h] }; else { gb.end = h; gb.hours.push(h); } }
           else { if (gb) { greenBlocks.push(gb); gb = null; } }
         }
@@ -2476,6 +3019,7 @@
                   rain2h={curRain2h}
                   selectedCrop={selectedCrop}
                   setSelectedCrop={setSelectedCrop}
+                  setLabelModal={setLabelModal}
                 />
               </div>
 
@@ -2518,7 +3062,7 @@
 
               {/* Nozzle & application recommendations (GO + CAUTION only) */}
               {(status === 'green' || status === 'yellow') && (
-                <SprayRecommendations windSpeed={curWind} status={status} selectedHerbs={selectedHerbs} />
+                <SprayRecommendations windSpeed={curWind} curTemp={curTemp} status={status} selectedHerbs={selectedHerbs} />
               )}
 
               {/* Nozzle calibration calculator */}
@@ -2533,6 +3077,60 @@
                       <NozzleCalculator recommendedGPA={15} fieldAcres={fieldAcres} />
                     </div>
                   </details>
+                </div>
+              )}
+
+              {/* Enhanced herbicide requirements summary */}
+              {selectedHerbs.length > 0 && (
+                <div style={{ background:'#f0fdf9', border:'1px solid rgba(5,150,105,0.13)', borderRadius:16, padding:'16px 20px', marginBottom:20 }}>
+                  <p style={{ margin:'0 0 10px', color:'rgba(15,45,30,0.82)', fontSize:11, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase' }}>
+                    📋 Forecast Considers Selected Herbicides ({selectedHerbs.length})
+                  </p>
+                  {(() => {
+                    // Calculate most restrictive requirements
+                    let maxTempRestriction = null, minWindReq = 0, maxWindReq = 15;
+                    let hasGroup4 = false, hasDicamba = false, hasEster = false;
+
+                    selectedHerbs.forEach(herb => {
+                      if (herb.group === '4') {
+                        hasGroup4 = true;
+                        if (herb.moa && herb.moa.toLowerCase().includes('dicamba')) {
+                          hasDicamba = true;
+                          minWindReq = Math.max(minWindReq, 3);
+                          maxWindReq = Math.min(maxWindReq, 10);
+                        }
+                        if (herb.ai && herb.ai.toLowerCase().includes('ester')) {
+                          hasEster = true;
+                          maxTempRestriction = maxTempRestriction ? Math.min(maxTempRestriction, 85) : 85;
+                        }
+                      }
+                      if (herb.tempMax) maxTempRestriction = maxTempRestriction ? Math.min(maxTempRestriction, herb.tempMax) : herb.tempMax;
+                      if (herb.windMax) maxWindReq = Math.min(maxWindReq, herb.windMax);
+                      if (herb.windMin) minWindReq = Math.max(minWindReq, herb.windMin);
+                    });
+
+                    const restrictions = [];
+                    if (minWindReq > 0 || maxWindReq < 15) {
+                      restrictions.push(`Wind: ${minWindReq}–${maxWindReq} mph required`);
+                    }
+                    if (maxTempRestriction) {
+                      restrictions.push(`Max temp: ${maxTempRestriction}°F`);
+                    }
+                    if (hasDicamba) restrictions.push('Dicamba 3-10 mph window enforced');
+                    if (hasEster) restrictions.push('2,4-D ester volatility limits active');
+
+                    return (
+                      <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+                        {restrictions.length > 0 ? restrictions.map((r, i) => (
+                          <span key={i} style={{ background:'rgba(5,150,105,0.08)', color:'#065f46', padding:'3px 10px', borderRadius:12, fontSize:11, fontWeight:600, whiteSpace:'nowrap' }}>
+                            {r}
+                          </span>
+                        )) : (
+                          <span style={{ color:'rgba(15,45,30,0.72)', fontSize:12, fontStyle:'italic' }}>Standard weather restrictions apply</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -2607,9 +3205,10 @@
                   {/* Colored segments */}
                   <div style={{ display:'flex', borderRadius:8, overflow:'hidden', height:28, marginBottom:6 }}>
                     {hourly.slice(0,24).map((h, i) => {
-                      const st = sprayStatus(h.wind, h.rain, h.rain);
+                      const st = sprayStatus(h.wind, h.rain, h.rain, h.temp, selectedHerbs);
                       const bg = st==='green' ? '#16a34a' : st==='yellow' ? '#d97706' : '#ef4444';
-                      return <div key={i} style={{ flex:1, background:bg }} title={`${h.isNow?'NOW':fmtHour(h.time)}: ${Math.round(h.wind)}mph · ${h.rain}% rain`} />;
+                      const herbInfo = selectedHerbs.length > 0 ? ` • ${selectedHerbs.length} herbicide${selectedHerbs.length>1?'s':''}` : '';
+                      return <div key={i} style={{ flex:1, background:bg }} title={`${h.isNow?'NOW':fmtHour(h.time)}: ${Math.round(h.wind)}mph, ${h.rain}% rain, ${Math.round(h.temp)}°F${herbInfo}`} />;
                     })}
                   </div>
                   {/* Time labels */}
@@ -2634,14 +3233,14 @@
 
                 {/* SVG wind + temp chart */}
                 <div style={{ padding: '14px 16px 8px', borderRadius: 14, background:'#ffffff', border:'1px solid rgba(5,150,105,0.15)', marginBottom: 12, boxShadow:'0 1px 4px rgba(0,0,0,0.05)' }}>
-                  <ForecastChart hourly={hourly} />
+                  <ForecastChart hourly={hourly} selectedHerbs={selectedHerbs} />
                 </div>
 
                 {/* Hourly card scroll */}
                 <div style={{ overflowX: 'auto', borderRadius: 14, background:'#ffffff', border:'1px solid rgba(5,150,105,0.15)', padding: 14, boxShadow:'0 1px 4px rgba(0,0,0,0.05)' }}>
                   <div style={{ display:'flex', gap: 8, minWidth: 'max-content' }}>
                     {hourly.map((h, i) => (
-                      <HourCell key={i} time={h.time} wind={h.wind} dir={h.dir} rain={h.rain} isNow={h.isNow} />
+                      <HourCell key={i} time={h.time} wind={h.wind} dir={h.dir} rain={h.rain} temp={h.temp} isNow={h.isNow} selectedHerbs={selectedHerbs} />
                     ))}
                   </div>
                   <p style={{ margin:'10px 0 0', textAlign:'center', color:'rgba(15,45,30,0.62)', fontSize:11 }}>
@@ -2657,6 +3256,14 @@
               </p>
             </div>
           )}
+
+          {/* Label Modal */}
+          <LabelModal
+            herb={labelModal.herb}
+            isOpen={labelModal.isOpen}
+            onClose={() => setLabelModal({ isOpen: false, herb: null })}
+          />
+
           </div>{/* /content zIndex wrapper */}
         </div>
       );
